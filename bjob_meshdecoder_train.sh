@@ -51,6 +51,9 @@ mkdir --parents ${EXP_DIR}
 mkdir --parents ${EXP_DIR}/source
 find . -type f -name "*.py" -o -name "*.sh" | xargs -i cp --parents "{}" ${EXP_DIR}/source
 
+# Ensure CUDA_VISIBLE_DEVICES is set to something
+export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0}
+
 python run_training.py \
     --data_path="/work1/patmjen/meshfit/datasets/shapes/spleen/smooth/" \
     --checkpoint_postfix=${EXP_POSTFIX} \
