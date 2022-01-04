@@ -7,6 +7,6 @@ module load cuda/11.3
 
 source /work1/patmjen/venvs/mdec/bin/activate
 
-export CUDA_VISIBLE_DEVICES=$(ns --query-gpu=index --format=csv,noheader | tr '\n' ',')
+export CUDA_VISIBLE_DEVICES=$(nvidia-smi --query-gpu=index --format=csv,noheader | tr '\n' ',')
 echo CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES}
 
