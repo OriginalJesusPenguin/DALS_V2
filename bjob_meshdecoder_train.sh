@@ -44,7 +44,8 @@ EXP_POSTFIX=${LSB_JOBID:-NOID}
 # Create experiment and trial directory
 EXP_DIR=/work1/patmjen/meshfit/experiments/mesh_decoder/md_${EXP_POSTFIX}
 mkdir --parents ${EXP_DIR}
-EXP_DIR=${EXP_DIR}/trial_$(ls -1 ${EXP_DIR} | wc -l)
+TRIAL_ID=$(ls -1 ${EXP_DIR} | wc -l)
+EXP_DIR=${EXP_DIR}/trial_${TRIAL_ID}
 mkdir --parents ${EXP_DIR}
 
 # Copy source code to experiment directory to know what was run
@@ -58,5 +59,7 @@ python -u run_training.py \
     --data_path="/work1/patmjen/meshfit/datasets/shapes/spleen/smooth/" \
     --checkpoint_postfix=${EXP_POSTFIX} \
     --checkpoint_dir=${EXP_DIR} \
+    --experiment_id=${EXP_POSTFIX} \
+    --trial_id=${TRIAL_ID} \
 
 

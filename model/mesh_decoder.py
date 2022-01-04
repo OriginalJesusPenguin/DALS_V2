@@ -6,6 +6,8 @@ from time import perf_counter as time
 from typing import Sequence
 from collections import defaultdict
 
+import wandb
+
 import numpy as np
 
 import torch
@@ -331,7 +333,7 @@ class MeshDecoderTrainer:
                 for name in epoch_losses.keys():
                     epoch_losses[name] /= num_epoch_batches
 
-                # Compute mean epoch profile times
+                # Compute epoch profile times
                 for key, times in epoch_profile_times.items():
                     self.profile_times[key].append(np.sum(times))
 
@@ -341,16 +343,29 @@ class MeshDecoderTrainer:
                     self.best_loss = epoch_losses['loss']
                     self.best_epoch_losses = epoch_losses
                     self.best_epoch = epoch
+
+                    wandb.summary['loss'] = self.best_loss
+                    wandb.summary['best_epoch'] = self.best_epoch
                     self.save_checkpoint(epoch) 
                     t_save = time() - t_save
                     self.profile_times['save'].append(t_save)
 
                 self.scheduler.step(epoch_losses['loss'])
 
+                # Logging
+                optim_lr = self.optimizer.state_dict()['param_groups'][0]['lr']
+                log_dict = { 'optimizer_lr': optim_lr, 'epoch': epoch }
+                for key, val in epoch_losses.items():
+                    log_dict[f'loss/{key}'] = val.detach().item()
+                for key, val in epoch_profile_times.items():
+                    log_dict[f'prof/{key}'] = np.sum(val)
+                wandb.log(log_dict)
+
                 t_epoch = time() - t_epoch
                 self.profile_times['epoch'].append(t_epoch)
 
-                print(f"Loss: {epoch_losses['loss']:.6g}, {t_epoch:.4f} seconds")
+                print(f"Loss: {epoch_losses['loss']:.6g}, "
+                      f"{t_epoch:.4f} seconds")
             else:
                 print('All epochs done')
         except KeyboardInterrupt:

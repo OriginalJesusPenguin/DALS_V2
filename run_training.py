@@ -3,6 +3,8 @@ import os
 import argparse
 from time import perf_counter as time
 
+import wandb
+
 import torch
 import pytorch3d.io
 
@@ -23,9 +25,12 @@ def load_meshes_in_dir(path):
 
 
 def main(args):
+    # Parse arguments
     parser = argparse.ArgumentParser()
 
     parser.add_argument('--device', type=str, default='cuda:0')
+    parser.add_argument('--experiment_id', default=None)
+    parser.add_argument('--trial_id', type=str, default=0)
 
     parser = MeshDecoderTrainer.add_argparse_args(parser)
 
@@ -35,6 +40,19 @@ def main(args):
 
     args = parser.parse_args(args)
 
+    # Start logging
+    if args.experiment_id is None:
+        args.experiment_id = os.getenv('LSB_JOBID', default='NOID')
+
+    wandb.init(
+        project='mesh-decoder',
+        entity='patmjen',
+        name=f'MeshDecoder_{args.experiment_id}/{args.trial_id}',
+        config=args,
+        dir=args.checkpoint_dir,
+    )
+
+    # Load data
     t_load = time()
     print('Loading data...')
     data = load_meshes_in_dir(args.data_path)
@@ -43,6 +61,7 @@ def main(args):
     t_load = time() - t_load
     print(f'Loaded data in {t_load:.2f} seconds')
 
+    # Train network
     trainer = MeshDecoderTrainer(**vars(args))
     trainer.train(train_data, val_data) 
 
