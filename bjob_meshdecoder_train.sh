@@ -40,11 +40,16 @@ export WANDB_API_KEY=$(cat ~/WANDB_api_key)
 wandb online
 
 EXP_POSTFIX=${LSB_JOBID:-NOID}
-EXP_DIR=/work1/patmjen/meshfit/experiments/mesh_decoder/md_${EXP_POSTFIX}
 
-# Copy source code to experiment directory
-mkdir ${EXP_DIR}
-find . -type f -name "*.py" -o -name "*.sh" | xargs -i cp --parents "{}" ${EXP_DIR}
+# Create experiment and trial directory
+EXP_DIR=/work1/patmjen/meshfit/experiments/mesh_decoder/md_${EXP_POSTFIX}
+mkdir --parents ${EXP_DIR}
+EXP_DIR=${EXP_DIR}/trial_$(ls -1 ${EXP_DIR} | wc -l)
+mkdir --parents ${EXP_DIR}
+
+# Copy source code to experiment directory to know what was run
+mkdir --parents ${EXP_DIR}/source
+find . -type f -name "*.py" -o -name "*.sh" | xargs -i cp --parents "{}" ${EXP_DIR}/source
 
 python run_training.py \
     --data_path="/work1/patmjen/meshfit/datasets/shapes/spleen/smooth/" \
