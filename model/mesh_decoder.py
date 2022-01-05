@@ -347,8 +347,12 @@ class MeshDecoderTrainer:
                     self.best_epoch_losses = epoch_losses
                     self.best_epoch = epoch
 
+                    # Log
                     wandb.summary['loss'] = self.best_loss
+                    wandb.summary['chamfer'] = epoch_losses['chamfer']
                     wandb.summary['best_epoch'] = self.best_epoch
+
+                    # Save new best model
                     self.save_checkpoint(epoch) 
                     t_save = time() - t_save
                     self.profile_times['save'].append(t_save)
