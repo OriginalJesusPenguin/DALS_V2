@@ -1,0 +1,34 @@
+project: 'mesh-decoder'
+entity: 'patmjen'
+name: 'learning rates'
+program: train.py
+method: grid
+metric:
+    name: loss/chamfer
+    goal: minimize
+command:
+    - python
+    - '-u'
+    - ${program}
+    - '--no_checkpoints'
+    - ${args}
+parameters:
+    data_path:
+        value: '/work1/patmjen/meshfit/datasets/shapes/spleen/smooth/'
+    num_epochs:
+        value: 6000
+    learning_rate_net:
+        values: [5.0e-5, 1.0e-4, 5.0e-4, 1.0e-3, 5.0e-3, 1.0e-2]
+    learning_rate_lv:
+        values: [5.0e-5, 1.0e-4, 5.0e-4, 1.0e-3, 5.0e-3, 1.0e-2]
+    lr_reduce_factor:
+        value: 0.5
+    weight_normal_loss:
+        value: 1.0e-3
+    weight_edge_loss:
+        value: 0.0
+    weight_laplacian_loss:
+        value: 0.0
+    weight_norm_loss:
+        value: 1.0e-3
+
