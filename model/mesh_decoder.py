@@ -360,8 +360,13 @@ class MeshDecoderTrainer:
                 self.scheduler.step(epoch_losses['loss'])
 
                 # Logging
-                optim_lr = self.optimizer.state_dict()['param_groups'][0]['lr']
-                log_dict = { 'optimizer_lr': optim_lr, 'epoch': epoch }
+                net_lr = self.optimizer.state_dict()['param_groups'][0]['lr']
+                lv_lr = self.optimizer.state_dict()['param_groups'][1]['lr']
+                log_dict = { 
+                    'optim/decoder_lr': net_lr, 
+                    'optim/lv_lr': lv_lr,
+                    'epoch': epoch,
+                }
                 for key, val in epoch_losses.items():
                     log_dict[f'loss/{key}'] = val.detach().item()
                 for key, val in epoch_profile_times.items():
