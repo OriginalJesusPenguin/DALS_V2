@@ -14,8 +14,7 @@ def main(args):
     parser = argparse.ArgumentParser()
 
     parser.add_argument('--device', type=str, default='cuda:0')
-    parser.add_argument('--experiment_id', default=None)
-    parser.add_argument('--trial_id', type=str, default=0)
+    parser.add_argument('--experiment_name', default=None)
 
     parser = MeshDecoderTrainer.add_argparse_args(parser)
 
@@ -26,13 +25,10 @@ def main(args):
     args = parser.parse_args(args)
 
     # Start logging
-    if args.experiment_id is None:
-        args.experiment_id = os.getenv('LSB_JOBID', default='NOID')
-
     wandb.init(
         project='mesh-decoder',
         entity='patmjen',
-        name=f'MeshDecoder_{args.experiment_id}/{args.trial_id}',
+        name=args.experiment_name,
         config=args,
         dir=args.checkpoint_dir,
     )

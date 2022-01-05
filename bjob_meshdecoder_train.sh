@@ -59,7 +59,12 @@ python -u train.py \
     --data_path="/work1/patmjen/meshfit/datasets/shapes/spleen/smooth/" \
     --checkpoint_postfix=${EXP_POSTFIX} \
     --checkpoint_dir=${EXP_DIR} \
-    --experiment_id=${EXP_POSTFIX} \
-    --trial_id=${TRIAL_ID} \
-
+    --experiment_name="MeshDecoder_${EXP_POSTFIX}/${TRIAL_ID}" \
+    --learning_rate_net=1e-4 \
+    --learning_rate_lv=1e-3 \
+    --lr_reduce_factor=0.5 \
+    --weight_normal_loss=1e-3 \
+    --weight_edge_loss=0 \
+    --weight_laplacian_loss=0 \
+    --weight_norm_loss=1e-3 \
 
