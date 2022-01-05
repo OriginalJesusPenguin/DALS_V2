@@ -55,5 +55,5 @@ find . -type f -name "*.py" -o -name "*.sh" | xargs -i cp --parents "{}" ${EXP_D
 # Ensure CUDA_VISIBLE_DEVICES is set to something
 export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0}
 
-wandb agent patmjen/mesh-decoder/cb8r4a8l
+wandb agent patmjen/mesh-decoder/cb8r4a8l --count=6
 
