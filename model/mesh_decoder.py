@@ -158,6 +158,7 @@ class MeshDecoderTrainer:
         self.decoder.to(device)
         self.template = self.template.to(device)
         self.latent_vectors = self.latent_vectors.to(device)
+        return self
 
 
     @staticmethod
