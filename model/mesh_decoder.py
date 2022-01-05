@@ -359,6 +359,9 @@ class MeshDecoderTrainer:
 
                 self.scheduler.step(epoch_losses['loss'])
 
+                t_epoch = time() - t_epoch
+                self.profile_times['epoch'].append(t_epoch)
+
                 # Logging
                 net_lr = self.optimizer.state_dict()['param_groups'][0]['lr']
                 lv_lr = self.optimizer.state_dict()['param_groups'][1]['lr']
@@ -371,10 +374,8 @@ class MeshDecoderTrainer:
                     log_dict[f'loss/{key}'] = val.detach().item()
                 for key, val in epoch_profile_times.items():
                     log_dict[f'prof/{key}'] = np.sum(val)
+                log_dict['prof/epoch'] = t_epoch
                 wandb.log(log_dict)
-
-                t_epoch = time() - t_epoch
-                self.profile_times['epoch'].append(t_epoch)
 
                 print(f"Loss: {epoch_losses['loss']:.6g}, "
                       f"{t_epoch:.4f} seconds")
