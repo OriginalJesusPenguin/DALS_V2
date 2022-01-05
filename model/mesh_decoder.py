@@ -195,6 +195,7 @@ class MeshDecoderTrainer:
         parser.add_argument('--learning_rate_lv', type=float, default=1e-3)
         parser.add_argument('--lr_reduce_factor', type=float, default=0.1)
         parser.add_argument('--lr_reduce_patience', type=int, default=100)
+        parser.add_argument('--lr_reduce_min_lr', type=float, default=1e-5)
 
         # Augmentation parameters
         parser.add_argument('--num_mesh_augment', type=int, default=100)
@@ -268,6 +269,7 @@ class MeshDecoderTrainer:
             self.optimizer,
             patience=self.lr_reduce_patience,
             factor=self.lr_reduce_factor,
+            min_lr=self.lr_reduce_min_lr,
         )
 
         # Run training loop
