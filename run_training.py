@@ -5,23 +5,8 @@ from time import perf_counter as time
 
 import wandb
 
-import torch
-import pytorch3d.io
-
 from model.mesh_decoder import MeshDecoderTrainer
-
-
-def load_meshes_in_dir(path):
-    mesh_fnames = sorted(os.listdir(path))
-    num_meshes = len(mesh_fnames)
-
-    meshes = []
-    io = pytorch3d.io.IO()
-    for fname in mesh_fnames:
-        meshes.append(io.load_mesh(os.path.join(path, fname), 
-                                   include_textures=False))
-
-    return meshes
+from util.data import load_meshes_in_dir
 
 
 def main(args):
