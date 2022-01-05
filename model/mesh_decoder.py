@@ -207,6 +207,7 @@ class MeshDecoderTrainer:
         parser.add_argument('--pw_t_range', type=float, default=0.25)
 
         # Misc. parameters
+        parser.add_argument('--no_checkpoints', action='store_true')
         parser.add_argument('--checkpoint_postfix', type=str, default='')
         parser.add_argument('--checkpoint_dir', type=str, default='.')
         parser.add_argument('--random_seed', type=int, default=1337)
@@ -353,7 +354,8 @@ class MeshDecoderTrainer:
                     wandb.summary['best_epoch'] = self.best_epoch
 
                     # Save new best model
-                    self.save_checkpoint(epoch) 
+                    if not self.no_checkpoints:
+                        self.save_checkpoint(epoch)
                     t_save = time() - t_save
                     self.profile_times['save'].append(t_save)
 
