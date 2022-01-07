@@ -48,7 +48,7 @@ mkdir --parents ${EXP_DIR}
 
 # Copy source code to experiment directory to know what was run
 mkdir --parents ${EXP_DIR}/source
-find . -type f -name "*.py" -o -name "*.sh" | xargs -i cp --parents "{}" ${EXP_DIR}/source
+find . -type f -name "*.py" -o -name "*.sh" -o -name "*.yaml" | xargs -i cp --parents "{}" ${EXP_DIR}/source
 
 # Ensure CUDA_VISIBLE_DEVICES is set to something
 export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0}
