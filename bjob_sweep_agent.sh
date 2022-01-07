@@ -24,8 +24,8 @@
 ##BSUB -N
 ### -- Specify the output and error file. %J is the job-id --
 ### -- -o and -e mean append, -oo and -eo mean overwrite --
-#BSUB -o /work1/patmjen/meshfit/experiments/mesh_decoder/batch_output/train_%J.out
-#BSUB -e /work1/patmjen/meshfit/experiments/mesh_decoder/batch_output/train_%J.err
+#BSUB -o /work1/patmjen/meshfit/experiments/mesh_decoder/batch_output/sweep_%J.out
+#BSUB -e /work1/patmjen/meshfit/experiments/mesh_decoder/batch_output/sweep_%J.err
 # -- end of LSF options --
 
 source init.sh
@@ -39,13 +39,11 @@ export WANDB_API_KEY=$(cat ~/WANDB_api_key)
 
 wandb online
 
-EXP_POSTFIX=${LSB_JOBID:-NOID}
+export EXP_POSTFIX=${LSB_JOBID:-NOID}
+export SWEEP_ID=8bli7keq
 
-# Create experiment and trial directory
-EXP_DIR=/work1/patmjen/meshfit/experiments/mesh_decoder/md_${EXP_POSTFIX}
-mkdir --parents ${EXP_DIR}
-TRIAL_ID=$(ls -1 ${EXP_DIR} | wc -l)
-EXP_DIR=${EXP_DIR}/trial_${TRIAL_ID}
+# Create experiment directory. The run directory is created in python
+export EXP_DIR=/work1/patmjen/meshfit/experiments/mesh_decoder/md_sa_${SWEEP_ID}_${EXP_POSTFIX}
 mkdir --parents ${EXP_DIR}
 
 # Copy source code to experiment directory to know what was run
@@ -55,5 +53,5 @@ find . -type f -name "*.py" -o -name "*.sh" | xargs -i cp --parents "{}" ${EXP_D
 # Ensure CUDA_VISIBLE_DEVICES is set to something
 export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0}
 
-wandb agent patmjen/mesh-decoder/cb8r4a8l --count=6
+wandb agent patmjen/mesh-decoder/${SWEEP_ID} --count=6
 
