@@ -1,16 +1,15 @@
 project: 'mesh-decoder'
 entity: 'patmjen'
-name: 'learning rates'
-program: train.py
+name: 'minimum learning rate'
+program: agent_train_wrapper.py
 method: grid
 metric:
-    name: loss/chamfer
+    name: chamfer
     goal: minimize
 command:
     - python
     - '-u'
     - ${program}
-    - '--no_checkpoints'
     - ${args}
 parameters:
     data_path:
@@ -18,11 +17,13 @@ parameters:
     num_epochs:
         value: 6000
     learning_rate_net:
-        values: [5.0e-5, 1.0e-4, 5.0e-4, 1.0e-3, 5.0e-3, 1.0e-2]
+        value: 5.0e-3
     learning_rate_lv:
-        values: [5.0e-5, 1.0e-4, 5.0e-4, 1.0e-3, 5.0e-3, 1.0e-2]
+        value: 5.0e-3
     lr_reduce_factor:
         value: 0.5
+    lr_reduce_min_lr:
+        values: [1.0e-5, 5.0e-5, 1.0e-4, 5.0e-4, 1.0e-3, 5.0e-3]
     weight_normal_loss:
         value: 1.0e-3
     weight_edge_loss:
