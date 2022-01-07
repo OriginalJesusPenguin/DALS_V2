@@ -60,7 +60,7 @@ def plot_meshes_wireframe(
     if fig_kwargs is None:
         fig_kwargs = dict()
         
-    if len(kwargs) == 0:
+    if 'marker' not in kwargs:
         kwargs = { 
             'marker': {
                 'symbol': 'circle',
