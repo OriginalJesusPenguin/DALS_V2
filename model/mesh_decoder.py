@@ -189,7 +189,7 @@ class MeshDecoderTrainer:
         parser.add_argument('--weight_norm_loss', type=float, default=1e-3)
         parser.add_argument('--weight_edge_loss', type=float, default=1e-2)
         parser.add_argument('--weight_laplacian_loss', type=float, default=1e-2)
-        parser.add_argument('--num_mesh_samples', type=int, default=4000)
+        parser.add_argument('--num_mesh_samples', type=int, default=10000)
         parser.add_argument('--train_batch_size', type=int, default=256)
         parser.add_argument('--learning_rate_net', type=float, default=1e-3)
         parser.add_argument('--learning_rate_lv', type=float, default=1e-3)
@@ -224,20 +224,33 @@ class MeshDecoderTrainer:
         t_aug = time()
         print('Augmenting data...')
         train_meshes = self.augment_meshes(train_meshes)
+        num_train_samples = len(train_meshes)
         t_aug = time() - t_aug
         print(f'Augmented data in {t_aug:.2f} seconds')
 
         t_samp = time()
         print('Sampling data...')
-        samples = sample_points_from_meshes(
-            join_meshes_as_batch(train_meshes), return_normals=True
-        )
-        self.train_point_samples = samples[0]
-        self.train_normal_samples = samples[1]
+        # Since sample_points_from_meshes uses a lot of memory we perform the
+        # sampling in batches to avoid running out of RAM.
+        # TODO: Check if batching is actially faster than processing 1-by-1.
+        sampling_batch_size = 1000  # TODO: Maybe make this a param.
+        self.train_point_samples = []
+        self.train_normal_samples = []
+        for ib in range(0, num_train_samples, sampling_batch_size):
+            ie = min(num_train_samples, ib + sampling_batch_size)
+            samples = sample_points_from_meshes(
+                join_meshes_as_batch(train_meshes[ib:ie]),
+                num_samples=self.num_mesh_samples,
+                return_normals=True,
+            )
+            self.train_point_samples.append(samples[0])
+            self.train_normal_samples.append(samples[1])
+
+        self.train_point_samples = torch.cat(self.train_point_samples)
+        self.train_normal_samples = torch.cat(self.train_normal_samples)
         t_samp = time() - t_samp 
         print(f'Sampled data in {t_samp:.2f} seconds')
 
-        num_train_samples = len(train_meshes)
         train_index_loader = DataLoader(
             torch.arange(num_train_samples),
             batch_size=self.train_batch_size,
@@ -421,7 +434,7 @@ class MeshDecoderTrainer:
         loss_la = 0
         for pred in preds:
             pred_points, pred_normals = sample_points_from_meshes(
-                pred, 4000, return_normals=True)
+                pred, self.num_mesh_samples, return_normals=True)
 
             cf_point, cf_normal = chamfer_distance(
                 x=pred_points, y=batch['target_points'],
