@@ -15,6 +15,7 @@ def main(args):
 
     parser.add_argument('--device', type=str, default='cuda:0')
     parser.add_argument('--experiment_name', default=None)
+    parser.add_argument('--no_wandb', action='store_true')
 
     parser = MeshDecoderTrainer.add_argparse_args(parser)
 
@@ -25,13 +26,14 @@ def main(args):
     args = parser.parse_args(args)
 
     # Start logging
-    wandb.init(
-        project='mesh-decoder',
-        entity='patmjen',
-        name=args.experiment_name,
-        config=args,
-        dir=args.checkpoint_dir,
-    )
+    if not args.no_wandb:
+        wandb.init(
+            project='mesh-decoder',
+            entity='patmjen',
+            name=args.experiment_name,
+            config=args,
+            dir=args.checkpoint_dir,
+        )
 
     # Load data
     t_load = time()
@@ -43,7 +45,7 @@ def main(args):
     print(f'Loaded data in {t_load:.2f} seconds')
 
     # Train network
-    trainer = MeshDecoderTrainer(**vars(args))
+    trainer = MeshDecoderTrainer(log_wandb=(not args.no_wandb), **vars(args))
     trainer.train(train_data, val_data) 
 
 

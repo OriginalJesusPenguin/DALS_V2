@@ -120,7 +120,7 @@ class MeshDecoder(nn.Module):
 
         
 class MeshDecoderTrainer:
-    def __init__(self, device=None, **kwargs):
+    def __init__(self, device=None, log_wandb=True, **kwargs):
         # Register hyper-parameters
         hparams = MeshDecoderTrainer.default_hparams()
         for key, value in hparams.items():
@@ -150,6 +150,8 @@ class MeshDecoderTrainer:
             # Device was specified so transfer everything
             # TODO: Create all things directly on device
             self.to(device)
+
+        self.log_wandb = log_wandb
 
 
     def to(self, device):
@@ -362,9 +364,10 @@ class MeshDecoderTrainer:
                     self.best_epoch = epoch
 
                     # Log
-                    wandb.summary['loss'] = self.best_loss
-                    wandb.summary['chamfer'] = epoch_losses['chamfer']
-                    wandb.summary['best_epoch'] = self.best_epoch
+                    if self.log_wandb:
+                        wandb.summary['loss'] = self.best_loss
+                        wandb.summary['chamfer'] = epoch_losses['chamfer']
+                        wandb.summary['best_epoch'] = self.best_epoch
 
                     # Save new best model
                     if not self.no_checkpoints:
@@ -378,19 +381,21 @@ class MeshDecoderTrainer:
                 self.profile_times['epoch'].append(t_epoch)
 
                 # Logging
-                net_lr = self.optimizer.state_dict()['param_groups'][0]['lr']
-                lv_lr = self.optimizer.state_dict()['param_groups'][1]['lr']
-                log_dict = { 
-                    'optim/decoder_lr': net_lr, 
-                    'optim/lv_lr': lv_lr,
-                    'epoch': epoch,
-                }
-                for key, val in epoch_losses.items():
-                    log_dict[f'loss/{key}'] = val.detach().item()
-                for key, val in epoch_profile_times.items():
-                    log_dict[f'prof/{key}'] = np.sum(val)
-                log_dict['prof/epoch'] = t_epoch
-                wandb.log(log_dict)
+                if self.log_wandb:
+                    opt_param_groups = self.optimizer.state_dict()['param_groups']
+                    net_lr = opt_param_groups[0]['lr']
+                    lv_lr = opt_param_groups[1]['lr']
+                    log_dict = {
+                        'optim/decoder_lr': net_lr,
+                        'optim/lv_lr': lv_lr,
+                        'epoch': epoch,
+                    }
+                    for key, val in epoch_losses.items():
+                        log_dict[f'loss/{key}'] = val.detach().item()
+                    for key, val in epoch_profile_times.items():
+                        log_dict[f'prof/{key}'] = np.sum(val)
+                    log_dict['prof/epoch'] = t_epoch
+                    wandb.log(log_dict)
 
                 print(f"Loss: {epoch_losses['loss']:.6g}, "
                       f"{t_epoch:.4f} seconds")
