@@ -31,6 +31,7 @@ from pytorch3d.loss import (
 
 from model.graph_conv import MyGraphConv
 from augment.point_wolf import PointWOLF
+from model.encodings import sph_encoding
 
 
 def seed_everything(seed: int):
@@ -80,8 +81,9 @@ class MeshOffsetBlock(nn.Module):
         )
         
         
-    def forward(self, meshes, latent_vectors):
-        vert_features = meshes.verts_packed()
+    def forward(self, meshes, latent_vectors, vert_features=None):
+        if vert_features is None:
+            vert_features = meshes.verts_packed()
         
         expanded_lv = latent_vectors[meshes.verts_packed_to_mesh_idx()]
         vert_features = torch.cat(
@@ -107,11 +109,15 @@ class MeshDecoder(nn.Module):
         ])
         
         
-    def forward(self, templates, latent_vectors):
+    def forward(self, templates, latent_vectors, template_vert_features=None):
         out = []
         pred = templates
         for i, block in enumerate(self.offset_blocks[:-1]):
-            pred = block(pred, latent_vectors)
+            if i > 0:
+                pred = block(pred, latent_vectors)
+            else:
+                pred = block(pred, latent_vectors,
+                             vert_features=template_vert_features)
             out.append(pred)            
             pred = self.subdivide(pred)
         
@@ -141,6 +147,13 @@ class MeshDecoderTrainer:
             template_subdiv -= hparams['steps'] + 1
         self.template = pytorch3d.utils.ico_sphere(template_subdiv)
         self.template.scale_verts_(0.1)
+        if hparams['encoding'] == 'spherical_harmonics':
+            self.template_encoding = torch.as_tensor(sph_encoding(
+                self.template.verts_packed(),
+                hparams['encoding_order'],
+            ))
+        else:  # hparams['encoding'] == 'none'
+            self.template_encoding = None
         self.latent_vectors = torch.tensor([])  # Dummy value
 
         if device is None:
@@ -159,6 +172,8 @@ class MeshDecoderTrainer:
         self.device = device
         self.decoder.to(device)
         self.template = self.template.to(device)
+        if self.template_encoding is not None:
+            self.template_encoding = self.template_encoding.to(device)
         self.latent_vectors = self.latent_vectors.to(device)
         return self
 
@@ -183,6 +198,9 @@ class MeshDecoderTrainer:
         parser.add_argument('--hidden_features', type=int, nargs='+',
                             default=[256, 256, 128])
         parser.add_argument('--template_subdiv', type=int, default=3)
+        parser.add_argument('--encoding', default='none',
+                            choices=['none', 'spherical_harmonics'])
+        parser.add_argument('--encoding_order', type=int, default=8)
 
         # Training parameters
         parser.add_argument('--num_epochs', type=int, default=9999)
@@ -268,6 +286,12 @@ class MeshDecoderTrainer:
         
         # Extending the template is slow so precomute it here
         self.template_extended = self.template.extend(self.batch_size)
+        if self.template_encoding is not None:
+            self.template_encoding_extended = self.template_encoding.expand(
+                self.batch_size, -1, -1
+            )
+        else:
+            self.template_encoding_extended = None
 
         # Set up optmizer and scheduler
         self.optimizer = torch.optim.Adam(
@@ -314,8 +338,11 @@ class MeshDecoderTrainer:
 
                     # Forward
                     t_forward = time()
-                    preds = self.decoder(batch['templates'],
-                                         batch['latent_vectors'])
+                    preds = self.decoder(
+                        batch['templates'],
+                        batch['latent_vectors'],
+                        template_vert_features=batch['template_encodings'],
+                    )
                     t_forward = time() - t_forward
                     epoch_profile_times['forward'].append(t_forward)
 
@@ -421,14 +448,22 @@ class MeshDecoderTrainer:
         if len(batch_idxs) != self.batch_size:
             # We have a spill batch so use slow extend here
             templates = self.template.extend(len(batch_idxs))
+            if self.template_encoding is not None:
+                template_encodings = self.template_encoding.expand(
+                    len(batch_idxs), -1, -1
+                )
+            else:
+                template_encodings = None
         else:
             templates = self.template_extended
+            template_encodings = self.template_encoding_extended
 
         return {
             'target_points': target_points,
             'target_normals': target_normals,
             'latent_vectors': batch_latent_vectors,
             'templates': templates,
+            'template_encodings': template_encodings,
         }
 
 
