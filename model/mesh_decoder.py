@@ -218,9 +218,6 @@ class MeshDecoderTrainer:
 
         t_samp = time()
         print('Sampling data...')
-        # Since sample_points_from_meshes uses a lot of memory we perform the
-        # sampling in batches to avoid running out of RAM.
-        # TODO: Check if batching is actially faster than processing 1-by-1.
         sampling_batch_size = 100  # TODO: Maybe make this a param.
         self.train_point_samples = []
         self.train_normal_samples = []
@@ -228,7 +225,7 @@ class MeshDecoderTrainer:
             ie = min(num_train_samples, ib + sampling_batch_size)
             samples = sample_points_from_meshes(
                 join_meshes_as_batch([m.to(self.device)
-                                      for m in meshes_aug[ib:ie]]),
+                                      for m in train_meshes[ib:ie]]),
                 num_samples=self.num_mesh_samples,
                 return_normals=True,
             )
