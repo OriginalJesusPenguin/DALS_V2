@@ -22,9 +22,51 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 """
 
+from typing import Sequence, List
+
+from tqdm import tqdm
+
 import torch
 import torch.nn as nn
 import numpy as np
+
+from pytorch3d.structures import Meshes
+
+
+def augment_meshes(
+    meshes: Sequence[Meshes],
+    num_mesh_augment: int = 100,
+    num_anchor: int = 4,
+    sample_type: str = 'fps',
+    sigma: float = 0.5,
+    R_range: float = 10,
+    S_range: float = 3,
+    T_range: float = 0.25,
+    loadbar=False,
+) -> List[Meshes]:
+    pw = PointWOLF(
+        num_anchor=num_anchor,
+        sample_type=sample_type,
+        sigma=sigma,
+        R_range=R_range,
+        S_range=S_range,
+        T_range=T_range,
+    )
+
+    aug_meshes = []
+
+    if loadbar:
+        meshes = tqdm(meshes)
+    for mesh in meshes:
+        verts = mesh.verts_packed().numpy()
+        faces = mesh.faces_packed()
+        for _ in range(num_mesh_augment):
+            aug_meshes.append(Meshes(
+                verts=[torch.as_tensor(pw(verts)[1])],
+                faces=[faces],
+            ))
+
+    return aug_meshes
     
 
 class PointWOLF(object):

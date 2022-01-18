@@ -30,22 +30,8 @@ from pytorch3d.loss import (
 )
 
 from model.graph_conv import MyGraphConv
-from augment.point_wolf import PointWOLF
 from model.encodings import sph_encoding
-
-
-def seed_everything(seed: int):
-    import random, os
-    import numpy as np
-    import torch
-                
-    random.seed(seed)
-    os.environ['PYTHONHASHSEED'] = str(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    torch.cuda.manual_seed(seed)
-    torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark = True
+from util import seed_everything
 
 
 class GraphConvBlock(nn.Module):
@@ -217,15 +203,6 @@ class MeshDecoderTrainer:
         parser.add_argument('--lr_reduce_patience', type=int, default=100)
         parser.add_argument('--lr_reduce_min_lr', type=float, default=1e-5)
 
-        # Augmentation parameters
-        parser.add_argument('--num_mesh_augment', type=int, default=100)
-        parser.add_argument('--pw_num_anchor', type=int, default=4)
-        parser.add_argument('--pw_sample_type', type=str, default='fps')
-        parser.add_argument('--pw_sigma', type=float, default=0.5)
-        parser.add_argument('--pw_r_range', type=float, default=10)
-        parser.add_argument('--pw_s_range', type=float, default=2)
-        parser.add_argument('--pw_t_range', type=float, default=0.25)
-
         # Misc. parameters
         parser.add_argument('--no_checkpoints', action='store_true')
         parser.add_argument('--checkpoint_postfix', type=str, default='')
@@ -236,17 +213,8 @@ class MeshDecoderTrainer:
 
     
     def train(self, train_meshes, val_meshes):
-        # Store input
-        orig_train_meshes = train_meshes
         seed_everything(self.random_seed)
-
-        # Augment and set up dataloaders 
-        t_aug = time()
-        print('Augmenting data...')
-        train_meshes = self.augment_meshes(train_meshes)
         num_train_samples = len(train_meshes)
-        t_aug = time() - t_aug
-        print(f'Augmented data in {t_aug:.2f} seconds')
 
         t_samp = time()
         print('Sampling data...')
@@ -547,28 +515,4 @@ class MeshDecoderTrainer:
             print(f'  {key:10}: {np.mean(value):8.6f} sec')
         print('------------------------------')
         print(f'  sum       : {profile_sum:8.6f} sec')
-
-
-    def augment_meshes(self, meshes):
-        pw = PointWOLF(
-            num_anchor=self.pw_num_anchor,
-            sample_type=self.pw_sample_type,
-            sigma=self.pw_sigma,
-            R_range=self.pw_r_range,
-            S_range=self.pw_s_range,
-            T_range=self.pw_t_range,
-        )
-
-        aug_meshes = []
-
-        for mesh in meshes:
-            verts = mesh.verts_packed().numpy()
-            faces = mesh.faces_packed()
-            for _ in range(self.num_mesh_augment):
-                aug_meshes.append(Meshes(
-                    verts=[torch.as_tensor(pw(verts)[1])],
-                    faces=[faces],
-                ))
-
-        return aug_meshes
 
