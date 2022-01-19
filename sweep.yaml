@@ -1,8 +1,8 @@
 project: 'mesh-decoder'
 entity: 'patmjen'
-name: 'minimum learning rate'
+name: 'spherical harmonics encoding order'
 program: agent_train_wrapper.py
-method: grid
+method: grid 
 metric:
     name: chamfer
     goal: minimize
@@ -13,19 +13,25 @@ command:
     - ${args}
 parameters:
     data_path:
-        value: '/work1/patmjen/meshfit/datasets/shapes/spleen/smooth/'
+        value: '/work1/patmjen/meshfit/datasets/shapes/liver/raw/'
     num_epochs:
-        value: 6000
+        value: 8000
+    num_mesh_augment:
+        value: 50
+    encoding:
+        value: spherical_harmonics
+    encoding_order:
+        values: [2, 4, 6, 8, 10]
     learning_rate_net:
-        value: 5.0e-3
+        value: 2.0e-3
     learning_rate_lv:
-        value: 5.0e-3
+        value: 2.0e-3
     lr_reduce_factor:
         value: 0.5
     lr_reduce_min_lr:
-        values: [1.0e-5, 5.0e-5, 1.0e-4, 5.0e-4, 1.0e-3, 5.0e-3]
+        value: 1.0e-5
     weight_normal_loss:
-        value: 1.0e-3
+        value: 0.0 
     weight_edge_loss:
         value: 0.0
     weight_laplacian_loss:

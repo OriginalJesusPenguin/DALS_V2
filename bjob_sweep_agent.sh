@@ -40,7 +40,7 @@ export WANDB_API_KEY=$(cat ~/WANDB_api_key)
 wandb online
 
 export EXP_POSTFIX=${LSB_JOBID:-NOID}
-export SWEEP_ID=8bli7keq
+export SWEEP_ID=gui5e7hf
 
 # Create experiment directory. The run directory is created in python
 export EXP_DIR=/work1/patmjen/meshfit/experiments/mesh_decoder/md_sa_${SWEEP_ID}_${EXP_POSTFIX}
