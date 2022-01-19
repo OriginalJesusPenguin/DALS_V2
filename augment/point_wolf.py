@@ -31,6 +31,7 @@ import torch.nn as nn
 import numpy as np
 
 from pytorch3d.structures import Meshes
+from pytorch3d.ops import sample_farthest_points
 
 
 def augment_meshes(
@@ -43,7 +44,12 @@ def augment_meshes(
     S_range: float = 3,
     T_range: float = 0.25,
     loadbar=False,
+    device: torch.device = None,
 ) -> List[Meshes]:
+    """
+    Augment meshes with PointWOLF.
+    """
+    device = torch.device(device)
     pw = PointWOLF(
         num_anchor=num_anchor,
         sample_type=sample_type,
@@ -58,15 +64,22 @@ def augment_meshes(
     if loadbar:
         meshes = tqdm(meshes)
     for mesh in meshes:
-        verts = mesh.verts_packed().numpy()
-        faces = mesh.faces_packed()
+        verts = mesh.verts_packed().to(device)
+        faces = mesh.faces_packed().unsqueeze(0)
+
         for _ in range(num_mesh_augment):
             aug_meshes.append(Meshes(
-                verts=[torch.as_tensor(pw(verts)[1])],
-                faces=[faces],
+                verts=pw(verts)[1].unsqueeze(0).to(mesh.device),
+                faces=faces,
             ))
 
     return aug_meshes
+    
+
+def uniform(low, high, size, device=None, dtype=None):
+    """Return uniformaly random numbers between low and high."""
+    a = torch.rand(*size, device=device, dtype=dtype)
+    return low + (high - low) * a
     
 
 class PointWOLF(object):
@@ -106,32 +119,40 @@ class PointWOLF(object):
             pos([N,3]) : original pointcloud
             pos_new([N,3]) : Pointcloud augmneted by PointWOLF
         """
-        M=self.num_anchor #(Mx3)
-        N, _=pos.shape #(N)
+        device = pos.device
+        M = self.num_anchor  # (M x 3)
+        N, _=pos.shape  # (N)
         
         if self.sample_type == 'random':
-            idx = np.random.choice(N,M)#(M)
+            idx = torch.multinomial(
+                torch.ones(1, device=device).expand(N, 1),
+                M,
+            )
+            pos_anchor = pos[idx]  # (M, 3), anchor point
         elif self.sample_type == 'fps':
-            idx = self.fps(pos, M) #(M)
+            pos_anchor = sample_farthest_points(
+                pos.unsqueeze(0),
+                torch.tensor([M], device=device),
+                M
+            )[0][0]  # Select first output and remove batch dimension.
         
-        pos_anchor = pos[idx] #(M,3), anchor point
         
-        pos_repeat = np.expand_dims(pos,0).repeat(M, axis=0)#(M,N,3)
-        pos_normalize = np.zeros_like(pos_repeat, dtype=pos.dtype)  #(M,N,3)
+        pos_repeat = pos.unsqueeze(0).expand(M, -1, -1) # (M, N, 3)
+        pos_normalize = torch.zeros_like(pos_repeat)  # (M, N, 3)
         
         #Move to canonical space
-        pos_normalize = pos_repeat - pos_anchor.reshape(M,-1,3)
+        pos_normalize = pos_repeat - pos_anchor.view(M, -1, 3)
         
         #Local transformation at anchor point
-        pos_transformed = self.local_transformaton(pos_normalize) #(M,N,3)
+        pos_transformed = self.local_transformaton(pos_normalize)  # (M, N, 3)
         
         #Move to origin space
-        pos_transformed = pos_transformed + pos_anchor.reshape(M,-1,3) #(M,N,3)
+        pos_transformed = pos_transformed + pos_anchor.view(M, -1, 3) #(M, N, 3)
         
         pos_new = self.kernel_regression(pos, pos_anchor, pos_transformed)
         pos_new = self.normalize(pos_new)
         
-        return pos.astype('float32'), pos_new.astype('float32')
+        return pos.float(), pos_new.float()
         
 
     def kernel_regression(self, pos, pos_anchor, pos_transformed):
@@ -145,22 +166,24 @@ class PointWOLF(object):
             pos_new([N,3]) : Pointcloud after weighted local transformation 
         """
         M, N, _ = pos_transformed.shape
+        device = pos_transformed.device
         
-        #Distance between anchor points & entire points
-        sub = np.expand_dims(pos_anchor,1).repeat(N, axis=1) - np.expand_dims(pos,0).repeat(M, axis=0) #(M,N,3), d
+        # Distance between anchor points & entire points
+        sub = pos_anchor.unsqueeze(1).expand(-1, N, -1) - pos.unsqueeze(0).expand(M, -1, -1)  # (M, N, 3), d
         
-        project_axis = self.get_random_axis(1)
+        project_axis = self.get_random_axis(1, device=device)
 
-        projection = np.expand_dims(project_axis, axis=1)*np.eye(3)#(1,3,3)
+        eye = torch.eye(3, device=sub.device, dtype=sub.dtype)
+        projection = project_axis.unsqueeze(1) * eye  # (1, 3, 3)
         
-        #Project distance
-        sub = sub @ projection # (M,N,3)
-        sub = np.sqrt(((sub) ** 2).sum(2)) #(M,N)  
+        # Project distance
+        sub = sub @ projection  # (M, N, 3)
+        sub = torch.sum(sub ** 2, dim=2).sqrt()  # (M, N)
         
-        #Kernel regression
-        weight = np.exp(-0.5 * (sub ** 2) / (self.sigma ** 2))  #(M,N) 
-        pos_new = (np.expand_dims(weight,2).repeat(3, axis=-1) * pos_transformed).sum(0) #(N,3)
-        pos_new = (pos_new / weight.sum(0, keepdims=True).T) # normalize by weight
+        # Kernel regression
+        weight = torch.exp(-0.5 * (sub ** 2) / (self.sigma ** 2))  # (M, N) 
+        pos_new = torch.sum(weight.unsqueeze(2).expand(-1, -1, 3) * pos_transformed, dim=0)  # (N, 3)
+        pos_new = pos_new / weight.sum(dim=0, keepdim=True).T  # Normalize by weight
         return pos_new
 
     
@@ -174,17 +197,19 @@ class PointWOLF(object):
             centroids([npoints]) : index list for fps
         """
         N, _ = pos.shape
-        centroids = np.zeros(npoint, dtype=np.int_) #(M)
-        distance = np.ones(N, dtype=np.float64) * 1e10 #(N)
-        farthest = np.random.randint(0, N, (1,), dtype=np.int_)
+        device = pos.device
+        centroids = torch.zeros(npoint, dtype=torch.long, device=device)  # (M)
+        distance = torch.ones(N, dtype=pos.dtype, device=device) * 1e10  # (N)
+        farthest = torch.randint(0, N, (1,), dtype=torch.long, device=device)
         for i in range(npoint):
             centroids[i] = farthest
             centroid = pos[farthest, :]
-            dist = ((pos - centroid)**2).sum(-1)
+            dist = torch.sum((pos - centroid) ** 2, dim=-1)
             mask = dist < distance
             distance[mask] = dist[mask]
             farthest = distance.argmax()
         return centroids
+
     
     def local_transformaton(self, pos_normalize):
         """
@@ -196,33 +221,37 @@ class PointWOLF(object):
             pos_normalize([M,N,3]) : Pointclouds after local transformation centered at M anchor points.
         """
         M,N,_ = pos_normalize.shape
-        transformation_dropout = np.random.binomial(1, 0.5, (M,3)) #(M,3)
-        transformation_axis =self.get_random_axis(M) #(M,3)
+        device = pos_normalize.device
+        transformation_dropout = torch.multinomial(torch.tensor([1.0, 1.0], device=device), M*3, replacement=True).view(M, 3)
+        transformation_axis = self.get_random_axis(M, device=device)  # (M, 3)
 
-        degree = np.pi * np.random.uniform(*self.R_range, size=(M,3)) / 180.0 * transformation_dropout[:,0:1] #(M,3), sampling from (-R_range, R_range) 
+        degree = np.pi * uniform(*self.R_range, size=(M, 3), device=device) / 180.0 * transformation_dropout[:, 0:1]  # (M, 3), sampling from (-R_range, R_range) 
         
-        scale = np.random.uniform(*self.S_range, size=(M,3)) * transformation_dropout[:,1:2] #(M,3), sampling from (1, S_range)
-        scale = scale*transformation_axis
-        scale = scale + 1*(scale==0) #Scaling factor must be larger than 1
+        scale = uniform(*self.S_range, size=(M, 3), device=device) * transformation_dropout[:, 1:2]  # (M, 3), sampling from (1, S_range)
+        scale = scale * transformation_axis
+        scale = scale + 1 * (scale == 0) #Scaling factor must be larger than 1
         
-        trl = np.random.uniform(*self.T_range, size=(M,3)) * transformation_dropout[:,2:3] #(M,3), sampling from (1, T_range)
-        trl = trl*transformation_axis
+        trl = uniform(*self.T_range, size=(M, 3), device=device) * transformation_dropout[:, 2:3]  # (M, 3), sampling from (1, T_range)
+        trl = trl * transformation_axis
         
-        #Scaling Matrix
-        S = np.expand_dims(scale, axis=1)*np.eye(3) # scailing factor to diagonal matrix (M,3) -> (M,3,3)
-        #Rotation Matrix
-        sin = np.sin(degree)
-        cos = np.cos(degree)
-        sx, sy, sz = sin[:,0], sin[:,1], sin[:,2]
-        cx, cy, cz = cos[:,0], cos[:,1], cos[:,2]
-        R = np.stack([cz*cy, cz*sy*sx - sz*cx, cz*sy*cx + sz*sx,
+        # Scaling Matrix
+        eye = torch.eye(3, device=scale.device)
+        S = scale.unsqueeze(1) * eye  # Scaling factor to diagonal matrix (M, 3) -> (M, 3, 3)
+
+        # Rotation Matrix
+        sins = torch.sin(degree)
+        coss = torch.cos(degree)
+        sx, sy, sz = sins[:,0], sins[:,1], sins[:,2]
+        cx, cy, cz = coss[:,0], coss[:,1], coss[:,2]
+        R = torch.stack([cz*cy, cz*sy*sx - sz*cx, cz*sy*cx + sz*sx,
              sz*cy, sz*sy*sx + cz*cy, sz*sy*cx - cz*sx,
-             -sy, cy*sx, cy*cx], axis=1).reshape(M,3,3)
+             -sy, cy*sx, cy*cx], dim=1).view(M, 3, 3)
         
-        pos_normalize = pos_normalize@R@S + trl.reshape(M,1,3)
+        pos_normalize = pos_normalize @ R @ S + trl.view(M, 1, 3)
         return pos_normalize
     
-    def get_random_axis(self, n_axis):
+
+    def get_random_axis(self, n_axis, device=None):
         """
         input :
             n_axis(int)
@@ -230,11 +259,12 @@ class PointWOLF(object):
         output :
             axis([n_axis,3]) : projection axis   
         """
-        axis = np.random.randint(1,8, (n_axis)) # 1(001):z, 2(010):y, 3(011):yz, 4(100):x, 5(101):xz, 6(110):xy, 7(111):xyz    
+        axis = torch.randint(1, 8, (n_axis,), device=device) # 1(001):z, 2(010):y, 3(011):yz, 4(100):x, 5(101):xz, 6(110):xy, 7(111):xyz    
         m = 3 
-        axis = (((axis[:,None] & (1 << np.arange(m)))) > 0).astype(int)
+        axis = (((axis[:, None] & (1 << torch.arange(m, device=device)))) > 0).to(int)
         return axis
     
+
     def normalize(self, pos):
         """
         input :
@@ -243,7 +273,8 @@ class PointWOLF(object):
         output :
             pos([N,3]) : normalized Pointcloud
         """
-        pos = pos - pos.mean(axis=-2, keepdims=True)
-        scale = (1 / np.sqrt((pos ** 2).sum(1)).max()) * 0.999999
+        pos = pos - pos.mean(dim=-2, keepdim=True)
+        scale = (1 / torch.sqrt((pos ** 2).sum(1)).max()) * 0.999999
         pos = scale * pos
         return pos
+
