@@ -49,7 +49,14 @@ def augment_meshes(
     """
     Augment meshes with PointWOLF.
     """
-    device = torch.device(device)
+    if len(meshes) == 0:
+        # Nothing to do, just return
+        return []
+
+    if device is not None:
+        device = torch.device(device)
+    else:
+        device = meshes[0].device
     pw = PointWOLF(
         num_anchor=num_anchor,
         sample_type=sample_type,
