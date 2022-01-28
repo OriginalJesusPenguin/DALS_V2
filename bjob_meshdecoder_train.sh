@@ -12,8 +12,8 @@
 #BSUB -W 24:00
 # specify system resources
 #BSUB -R "span[hosts=1]"
-#BSUB -R "rusage[mem=8GB]"
-##BSUB -R "select[gpu32gb]"
+#BSUB -R "rusage[mem=16GB]"
+#BSUB -R "select[gpu32gb]"
 ### -- set the email address --
 # please uncomment the following line and put in your e-mail address,
 # if you want to receive e-mail notifications on a non-default address
