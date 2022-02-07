@@ -3,7 +3,7 @@
 ### -- specify queue --
 #BSUB -q gpuv100
 ### -- set the job Name --
-#BSUB -J md_train
+#BSUB -J sd_train
 ### -- ask for number of cores (default: 1) --
 #BSUB -n 8
 ### -- Select the resources: 1 gpu in exclusive process mode --
@@ -12,7 +12,7 @@
 #BSUB -W 24:00
 # specify system resources
 #BSUB -R "span[hosts=1]"
-#BSUB -R "rusage[mem=16GB]"
+#BSUB -R "rusage[mem=24GB]"
 #BSUB -R "select[gpu32gb]"
 ### -- set the email address --
 # please uncomment the following line and put in your e-mail address,
@@ -24,8 +24,8 @@
 ##BSUB -N
 ### -- Specify the output and error file. %J is the job-id --
 ### -- -o and -e mean append, -oo and -eo mean overwrite --
-#BSUB -o /work1/patmjen/meshfit/experiments/mesh_decoder/batch_output/train_%J.out
-#BSUB -e /work1/patmjen/meshfit/experiments/mesh_decoder/batch_output/train_%J.err
+#BSUB -o /work1/patmjen/meshfit/experiments/deep_sdf/batch_output/train_%J.out
+#BSUB -e /work1/patmjen/meshfit/experiments/deep_sdf/batch_output/train_%J.err
 # -- end of LSF options --
 
 source init.sh
@@ -42,7 +42,7 @@ wandb online
 EXP_POSTFIX=${LSB_JOBID:-NOID}
 
 # Create experiment and trial directory
-EXP_DIR=/work1/patmjen/meshfit/experiments/mesh_decoder/md_${EXP_POSTFIX}
+EXP_DIR=/work1/patmjen/meshfit/experiments/deep_sdf/sd_${EXP_POSTFIX}
 mkdir --parents ${EXP_DIR}
 TRIAL_ID=$(ls -1 ${EXP_DIR} | wc -l)
 EXP_DIR=${EXP_DIR}/trial_${TRIAL_ID}
@@ -56,24 +56,18 @@ find . -type f -name "*.py" -o -name "*.sh" -o -name "*.yaml" | xargs -i cp --pa
 export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0}
 
 python -u train.py \
-    --data_path="/work1/patmjen/meshfit/datasets/shapes/liver/raw/" \
-    --num_augment=100 \
-    --experiment_name="MD${EXP_POSTFIX}/${TRIAL_ID}" \
-    mesh_decoder \
+    --data_path="/work1/patmjen/meshfit/datasets/sdf/liver/raw/" \
+    --num_augment=0 \
+    --experiment_name="DS${EXP_POSTFIX}/${TRIAL_ID}" \
+    deep_sdf \
     --checkpoint_postfix=${EXP_POSTFIX} \
     --checkpoint_dir=${EXP_DIR} \
-    --decoder_mode="gcnn" \
-    --encoding="none" \
-    --num_epochs=99999 \
-    --latent_features=128 \
-    --learning_rate_net=2e-3 \
-    --learning_rate_lv=2e-3 \
-    --lr_reduce_factor=0.5 \
-    --lr_reduce_min_lr=1e-5 \
-    --weight_normal_loss=0 \
-    --weight_edge_loss=1e-4 \
-    --weight_laplacian_loss=1e-4 \
-    --weight_norm_loss=1e-3 \
-    --template_subdiv=3 \
-    --hidden_features 512 512 512 512 
+    --num_epochs=6000 \
+    --batch_size=32 \
+    --subsample_factor=100 \
+    --learning_rate_net=1e-4 \
+    --dims 512 512 512 512 512 \
+    --norm_layers 0 1 2 3 4 \
+    --latent_in 2 \
+    --dropout \
 
