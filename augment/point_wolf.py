@@ -34,9 +34,54 @@ from pytorch3d.structures import Meshes
 from pytorch3d.ops import sample_farthest_points
 
 
+def augment_points(
+    points: torch.Tensor,
+    num_augment: int = 100,
+    num_anchor: int = 4,
+    sample_type: str = 'fps',
+    sigma: float = 0.5,
+    R_range: float = 10,
+    S_range: float = 3,
+    T_range: float = 0.25,
+    loadbar=False,
+    device: torch.device = None,
+) -> torch.Tensor:
+    """
+    Augment points with PointWOLF.
+    """
+    assert len(points.shape) == 3, 'points must be B x N x D'
+    if len(points) == 0:
+        # Nothing to do, just return
+        return []
+
+    if device is not None:
+        device = torch.device(device)
+    else:
+        device = meshes[0].device
+    pw = PointWOLF(
+        num_anchor=num_anchor,
+        sample_type=sample_type,
+        sigma=sigma,
+        R_range=R_range,
+        S_range=S_range,
+        T_range=T_range,
+    )
+
+    aug_points = []
+
+    if loadbar:
+        points = tqdm(points)
+    for p in points:
+        p_d = p.to(device)
+        for _ in range(num_augment):
+            aug_points.append(pw(p_d)[1].to(p.device))
+
+    return torch.stack(aug_points)
+
+
 def augment_meshes(
     meshes: Sequence[Meshes],
-    num_mesh_augment: int = 100,
+    num_augment: int = 100,
     num_anchor: int = 4,
     sample_type: str = 'fps',
     sigma: float = 0.5,
@@ -74,7 +119,7 @@ def augment_meshes(
         verts = mesh.verts_packed().to(device)
         faces = mesh.faces_packed().unsqueeze(0)
 
-        for _ in range(num_mesh_augment):
+        for _ in range(num_augment):
             aug_meshes.append(Meshes(
                 verts=pw(verts)[1].unsqueeze(0).to(mesh.device),
                 faces=faces,
