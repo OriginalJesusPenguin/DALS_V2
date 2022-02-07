@@ -58,18 +58,24 @@ class GraphConvBlock(nn.Module):
         return vert_features
     
     
-class MeshOffsetBlock(nn.Module):
-    def __init__(self, latent_features, hidden_features=None):
+class MeshOffsetBlockGCNN(nn.Module):
+    def __init__(self, latent_features, hidden_features=None,
+                 vert_in_features=3, vert_out_features=3):
         super().__init__()
         
         self.graph_conv_block = GraphConvBlock(
-            3 + latent_features, 3, hidden_features
+            vert_in_features + latent_features,
+            vert_out_features,
+            hidden_features,
         )
         
         
     def forward(self, meshes, latent_vectors, vert_features=None):
         if vert_features is None:
             vert_features = meshes.verts_packed()
+        else:
+            vf_dim = vert_features.shape[-1]
+            vert_features = vert_features.reshape(-1, vf_dim)
         
         expanded_lv = latent_vectors[meshes.verts_packed_to_mesh_idx()]
         vert_features = torch.cat(
@@ -78,19 +84,64 @@ class MeshOffsetBlock(nn.Module):
         edges = meshes.edges_packed()
         offsets = self.graph_conv_block(vert_features, edges)
         return meshes.offset_verts(offsets.view(-1, 3))
+
+
+class MeshOffsetBlockMLP(nn.Module):
+    def __init__(self, latent_features, hidden_features=None,
+                 vert_in_features=3, vert_out_features=3):
+        super().__init__()
+
+        if hidden_features is None:
+            hidden_features = []
+        features = [vert_in_features + latent_features] + hidden_features
+        mlp = []
+        for i, o in zip(features[:-1], features[1:]):
+            mlp.append(nn.Linear(i, o))
+            mlp.append(nn.ReLU())
+        mlp.append(nn.Linear(features[-1], vert_out_features))
+        self.mlp = nn.Sequential(*mlp)
+
+
+    def forward(self, meshes, latent_vectors, vert_features=None):
+        if vert_features is None:
+            vert_features = meshes.verts_packed()
+        else:
+            vf_dim = vert_features.shape[-1]
+            vert_features = vert_features.reshape(-1, vf_dim)
+
+        expanded_lv = latent_vectors[meshes.verts_packed_to_mesh_idx()]
+        vert_features = torch.cat(
+            [vert_features, expanded_lv], dim=-1
+        )
+        offsets = self.mlp(vert_features)
+        return meshes.offset_verts(offsets.view(-1, 3))
     
     
 class MeshDecoder(nn.Module):
     def __init__(self, latent_features, steps, hidden_features=None,
-                 subdivide=False):
+                 subdivide=False, mode='gcnn', vert_in_features=3,
+                 vert_out_features=3):
         super().__init__()
+
+        mode = mode.lower()
+        if mode == 'gcnn':
+            MeshOffsetBlock = MeshOffsetBlockGCNN
+        elif mode == 'mlp':
+            MeshOffsetBlock = MeshOffsetBlockMLP
+        else:
+            raise ValueError(f"mode must be 'gcnn' or 'mlp' but was: {mode}")
         
         if subdivide:
             self.subdivide = SubdivideMeshes()
         else:
             self.subdivide = nn.Identity()
         self.offset_blocks = nn.ModuleList([
-            MeshOffsetBlock(latent_features, hidden_features)
+            MeshOffsetBlock(
+                latent_features,
+                hidden_features,
+                vert_in_features,
+                vert_out_features,
+            )
             for _ in range(steps)
         ])
         
@@ -98,16 +149,14 @@ class MeshDecoder(nn.Module):
     def forward(self, templates, latent_vectors, template_vert_features=None):
         out = []
         pred = templates
-        for i, block in enumerate(self.offset_blocks[:-1]):
-            if i > 0:
-                pred = block(pred, latent_vectors)
-            else:
-                pred = block(pred, latent_vectors,
-                             vert_features=template_vert_features)
-            out.append(pred)            
+        pred = self.offset_blocks[0](templates, latent_vectors,
+                                     vert_features=template_vert_features)
+        out.append(pred)
+        for block in self.offset_blocks[1:]:
             pred = self.subdivide(pred)
+            pred = block(pred, latent_vectors)
+            out.append(pred)
         
-        out.append(self.offset_blocks[-1](pred, latent_vectors))
         return out
 
         
@@ -122,12 +171,6 @@ class MeshDecoderTrainer:
         self.hparams = hparams
 
         # Initialize model
-        self.decoder = MeshDecoder(
-            hparams['latent_features'],
-            hparams['steps'],
-            hparams['hidden_features'],
-            hparams['subdivide'],
-        )
         template_subdiv = hparams['template_subdiv']
         if hparams['subdivide']:
             template_subdiv -= hparams['steps'] + 1
@@ -138,8 +181,18 @@ class MeshDecoderTrainer:
                 self.template.verts_packed(),
                 hparams['encoding_order'],
             ))
+            vert_in_feats = (hparams['encoding_order'] + 1) ** 2
         else:  # hparams['encoding'] == 'none'
             self.template_encoding = None
+            vert_in_feats = 3
+        self.decoder = MeshDecoder(
+            latent_features=hparams['latent_features'],
+            steps=hparams['steps'],
+            hidden_features=hparams['hidden_features'],
+            subdivide=hparams['subdivide'],
+            mode=hparams['decoder_mode'],
+            vert_in_features=vert_in_feats,
+        )
         self.latent_vectors = torch.tensor([])  # Dummy value
 
         if device is None:
@@ -184,6 +237,8 @@ class MeshDecoderTrainer:
         parser.add_argument('--hidden_features', type=int, nargs='+',
                             default=[256, 256, 128])
         parser.add_argument('--template_subdiv', type=int, default=3)
+        parser.add_argument('--decoder_mode', default='gcnn',
+                            choices=['gcnn', 'mlp'])
         parser.add_argument('--encoding', default='none',
                             choices=['none', 'spherical_harmonics'])
         parser.add_argument('--encoding_order', type=int, default=8)
