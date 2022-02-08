@@ -84,15 +84,31 @@ def load_meshes_in_dir(
         meshes: list of loaded Meshes objects.
     """
     mesh_fnames = sorted(os.listdir(path))
-    num_meshes = len(mesh_fnames)
+    mesh_fnames = [os.path.join(path, fname) for fname in mesh_fnames]
 
+    return load_meshes(mesh_fnames, loadbar=loadbar)
+
+
+def load_meshes(
+    fnames: Sequence[Union[str, bytes, os.PathLike]],
+    loadbar: bool = False
+) -> List[Meshes]:
+    """
+    Load meshes given by sequence of file names
+
+    Args:
+        fnames: Sequence of path-like giving file names of meshes.
+        loadbar: Show progress with loading bar.
+
+    Returns:
+        meshes: list of loaded Meshes objects.
+    """
     meshes = []
     io = pytorch3d.io.IO()
     if loadbar:
         mesh_fnames = tqdm(mesh_fnames)
     for fname in mesh_fnames:
-        meshes.append(io.load_mesh(os.path.join(path, fname), 
-                                   include_textures=False))
+        meshes.append(io.load_mesh(fname, include_textures=False))
 
     return meshes
 
