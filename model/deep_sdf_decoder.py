@@ -129,6 +129,55 @@ def validate_samples_dict(samples):
 
 
 class DeepSdfDecoderTrainer:
+    @staticmethod
+    def add_argparse_args(parent_parser):
+        parser = parent_parser.add_argument_group("DeepSdfDecoderTrainer")
+
+        # Model parameters
+        parser.add_argument('--latent_size', type=int, default=128)
+        parser.add_argument('--dims', type=int, nargs='+',
+                            default=[512] * 8)
+        parser.add_argument('--dropout', type=int, nargs='*',
+                            default=list(range(8)))
+        parser.add_argument('--dropout_prob', type=float, default=0.2)
+        parser.add_argument('--norm_layers', type=int, nargs='*',
+                            default=list(range(8)))
+        parser.add_argument('--latent_in', type=int, nargs='*',
+                            default=[4])
+        parser.add_argument('--xyz_in_all', action='store_true')
+        parser.add_argument('--use_tanh', action='store_true')
+        parser.add_argument('--weight_norm', action='store_true')
+        parser.add_argument('--latent_dropout', action='store_true')
+
+        # Training parameters
+        parser.add_argument('--num_epochs', type=int, default=2001)
+        parser.add_argument('--batch_size', type=int, default=64)
+        parser.add_argument('--clamp_dist', type=float, default=0.1)
+        parser.add_argument('--weight_latent_norm', type=float, default=1e-4)
+        parser.add_argument('--learning_rate_net', type=float, default=5e-4)
+        parser.add_argument('--learning_rate_lv', type=float, default=1e-3)
+        parser.add_argument('--lr_step', type=int, default=500)
+        parser.add_argument('--lr_reduce_factor', type=float, default=0.5)
+        parser.add_argument('--subsample_factor', type=int, default=1)
+
+        # Misc. parameters
+        parser.add_argument('--no_checkpoints', action='store_true')
+        parser.add_argument('--checkpoint_postfix', type=str, default='')
+        parser.add_argument('--checkpoint_dir', type=str, default='.')
+        parser.add_argument('--random_seed', type=int, default=1337)
+
+        return parent_parser
+
+
+    @staticmethod
+    def default_hparams():
+        # Build an argparser and parse an empty list to get default values
+        default_parser = DeepSdfDecoderTrainer.add_argparse_args(
+            argparse.ArgumentParser()
+        )
+        return vars(default_parser.parse_args([]))
+
+
     def __init__(self, device=None, log_wandb=True, **kwargs):
         # Register hyperparameters
         hparams = DeepSdfDecoderTrainer.default_hparams()
@@ -169,55 +218,6 @@ class DeepSdfDecoderTrainer:
         self.device = device
         self.decoder.to(device)
         return self
-
-
-    @staticmethod
-    def default_hparams():
-        # Build an argparser and parse an empty list to get default values
-        default_parser = DeepSdfDecoderTrainer.add_argparse_args(
-            argparse.ArgumentParser()
-        )
-        return vars(default_parser.parse_args([]))
-
-
-    @staticmethod
-    def add_argparse_args(parent_parser):
-        parser = parent_parser.add_argument_group("DeepSdfDecoderTrainer")
-
-        # Model parameters
-        parser.add_argument('--latent_size', type=int, default=128)
-        parser.add_argument('--dims', type=int, nargs='+',
-                            default=[512] * 8)
-        parser.add_argument('--dropout', type=int, nargs='*',
-                            default=list(range(8)))
-        parser.add_argument('--dropout_prob', type=float, default=0.2)
-        parser.add_argument('--norm_layers', type=int, nargs='*',
-                            default=list(range(8)))
-        parser.add_argument('--latent_in', type=int, nargs='*',
-                            default=[4])
-        parser.add_argument('--xyz_in_all', action='store_true')
-        parser.add_argument('--use_tanh', action='store_true')
-        parser.add_argument('--weight_norm', action='store_true')
-        parser.add_argument('--latent_dropout', action='store_true')
-
-        # Training parameters
-        parser.add_argument('--num_epochs', type=int, default=2001)
-        parser.add_argument('--batch_size', type=int, default=64)
-        parser.add_argument('--clamp_dist', type=float, default=0.1)
-        parser.add_argument('--weight_latent_norm', type=float, default=1e-4)
-        parser.add_argument('--learning_rate_net', type=float, default=5e-4)
-        parser.add_argument('--learning_rate_lv', type=float, default=1e-3)
-        parser.add_argument('--lr_step', type=int, default=500)
-        parser.add_argument('--lr_reduce_factor', type=float, default=0.5)
-        parser.add_argument('--subsample_factor', type=int, default=1)
-
-        # Misc. parameters
-        parser.add_argument('--no_checkpoints', action='store_true')
-        parser.add_argument('--checkpoint_postfix', type=str, default='')
-        parser.add_argument('--checkpoint_dir', type=str, default='.')
-        parser.add_argument('--random_seed', type=int, default=1337)
-
-        return parent_parser
 
 
     def train(self, train_samples, val_samples):

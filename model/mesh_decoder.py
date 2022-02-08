@@ -161,6 +161,56 @@ class MeshDecoder(nn.Module):
 
         
 class MeshDecoderTrainer:
+    @staticmethod
+    def add_argparse_args(parent_parser):
+        parser = parent_parser.add_argument_group("MeshDecoderTrainer")
+
+        # Model parameters
+        parser.add_argument('--latent_features', type=int, default=128)
+        parser.add_argument('--steps', type=int, default=1)
+        parser.add_argument('--subdivide', type=bool, default=False)
+        parser.add_argument('--hidden_features', type=int, nargs='+',
+                            default=[256, 256, 128])
+        parser.add_argument('--template_subdiv', type=int, default=3)
+        parser.add_argument('--decoder_mode', default='gcnn',
+                            choices=['gcnn', 'mlp'])
+        parser.add_argument('--encoding', default='none',
+                            choices=['none', 'spherical_harmonics'])
+        parser.add_argument('--encoding_order', type=int, default=8)
+
+        # Training parameters
+        parser.add_argument('--num_epochs', type=int, default=9999)
+        parser.add_argument('--batch_size', type=int, default=256)
+        parser.add_argument('--weight_normal_loss', type=float, default=0)
+        parser.add_argument('--weight_norm_loss', type=float, default=1e-3)
+        parser.add_argument('--weight_edge_loss', type=float, default=1e-2)
+        parser.add_argument('--weight_laplacian_loss', type=float, default=1e-2)
+        parser.add_argument('--num_mesh_samples', type=int, default=10000)
+        parser.add_argument('--train_batch_size', type=int, default=256)
+        parser.add_argument('--learning_rate_net', type=float, default=1e-3)
+        parser.add_argument('--learning_rate_lv', type=float, default=1e-3)
+        parser.add_argument('--lr_reduce_factor', type=float, default=0.1)
+        parser.add_argument('--lr_reduce_patience', type=int, default=100)
+        parser.add_argument('--lr_reduce_min_lr', type=float, default=1e-5)
+
+        # Misc. parameters
+        parser.add_argument('--no_checkpoints', action='store_true')
+        parser.add_argument('--checkpoint_postfix', type=str, default='')
+        parser.add_argument('--checkpoint_dir', type=str, default='.')
+        parser.add_argument('--random_seed', type=int, default=1337)
+        
+        return parent_parser
+
+    
+    @staticmethod
+    def default_hparams():
+        # Build an argparser and parse an empty list to get defualt values
+        default_parser = MeshDecoderTrainer.add_argparse_args(
+            argparse.ArgumentParser()
+        )
+        return vars(default_parser.parse_args([]))
+
+
     def __init__(self, device=None, log_wandb=True, **kwargs):
         # Register hyper-parameters
         hparams = MeshDecoderTrainer.default_hparams()
@@ -217,56 +267,6 @@ class MeshDecoderTrainer:
         return self
 
 
-    @staticmethod
-    def default_hparams():
-        # Build an argparser and parse an empty list to get defualt values
-        default_parser = MeshDecoderTrainer.add_argparse_args(
-            argparse.ArgumentParser()
-        )
-        return vars(default_parser.parse_args([]))
-
-
-    @staticmethod
-    def add_argparse_args(parent_parser):
-        parser = parent_parser.add_argument_group("MeshDecoderTrainer")
-
-        # Model parameters
-        parser.add_argument('--latent_features', type=int, default=128)
-        parser.add_argument('--steps', type=int, default=1)
-        parser.add_argument('--subdivide', type=bool, default=False)
-        parser.add_argument('--hidden_features', type=int, nargs='+',
-                            default=[256, 256, 128])
-        parser.add_argument('--template_subdiv', type=int, default=3)
-        parser.add_argument('--decoder_mode', default='gcnn',
-                            choices=['gcnn', 'mlp'])
-        parser.add_argument('--encoding', default='none',
-                            choices=['none', 'spherical_harmonics'])
-        parser.add_argument('--encoding_order', type=int, default=8)
-
-        # Training parameters
-        parser.add_argument('--num_epochs', type=int, default=9999)
-        parser.add_argument('--batch_size', type=int, default=256)
-        parser.add_argument('--weight_normal_loss', type=float, default=0)
-        parser.add_argument('--weight_norm_loss', type=float, default=1e-3)
-        parser.add_argument('--weight_edge_loss', type=float, default=1e-2)
-        parser.add_argument('--weight_laplacian_loss', type=float, default=1e-2)
-        parser.add_argument('--num_mesh_samples', type=int, default=10000)
-        parser.add_argument('--train_batch_size', type=int, default=256)
-        parser.add_argument('--learning_rate_net', type=float, default=1e-3)
-        parser.add_argument('--learning_rate_lv', type=float, default=1e-3)
-        parser.add_argument('--lr_reduce_factor', type=float, default=0.1)
-        parser.add_argument('--lr_reduce_patience', type=int, default=100)
-        parser.add_argument('--lr_reduce_min_lr', type=float, default=1e-5)
-
-        # Misc. parameters
-        parser.add_argument('--no_checkpoints', action='store_true')
-        parser.add_argument('--checkpoint_postfix', type=str, default='')
-        parser.add_argument('--checkpoint_dir', type=str, default='.')
-        parser.add_argument('--random_seed', type=int, default=1337)
-        
-        return parent_parser
-
-    
     def train(self, train_meshes, val_meshes):
         seed_everything(self.random_seed)
         num_train_samples = len(train_meshes)
