@@ -106,8 +106,8 @@ def load_meshes(
     meshes = []
     io = pytorch3d.io.IO()
     if loadbar:
-        mesh_fnames = tqdm(mesh_fnames)
-    for fname in mesh_fnames:
+        fnames = tqdm(fnames)
+    for fname in fnames:
         meshes.append(io.load_mesh(fname, include_textures=False))
 
     return meshes
