@@ -18,6 +18,7 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader
 
 from util import seed_everything
+from model.encodings import pos_encoding
 
 
 class DeepSdfDecoder(nn.Module):
@@ -33,10 +34,11 @@ class DeepSdfDecoder(nn.Module):
         xyz_in_all=None,
         use_tanh=False,
         latent_dropout=False,
+        xyz_size=3,
     ):
         super().__init__()
 
-        dims = [latent_size + 3] + dims + [1]
+        dims = [latent_size + xyz_size] + dims + [1]
 
         self.num_layers = len(dims)
         self.norm_layers = norm_layers
@@ -48,13 +50,15 @@ class DeepSdfDecoder(nn.Module):
         self.xyz_in_all = xyz_in_all
         self.weight_norm = weight_norm
 
+        self.xyz_size = xyz_size
+
         for layer in range(0, self.num_layers - 1):
             if layer + 1 in latent_in:
                 out_dim = dims[layer + 1] - dims[0]
             else:
                 out_dim = dims[layer + 1]
                 if self.xyz_in_all and layer != self.num_layers - 2:
-                    out_dim -= 3
+                    out_dim -= xyz_size
 
             if weight_norm and layer in self.norm_layers:
                 setattr(
@@ -81,12 +85,12 @@ class DeepSdfDecoder(nn.Module):
         self.dropout = dropout
         self.th = nn.Tanh()
 
-    # input: N x (L+3)
+    # input: N x (L+D)
     def forward(self, input):
-        xyz = input[:, -3:]
+        xyz = input[:, -self.xyz_size:]
 
-        if input.shape[1] > 3 and self.latent_dropout:
-            latent_vecs = input[:, :-3]
+        if input.shape[1] > self.xyz_size and self.latent_dropout:
+            latent_vecs = input[:, :-self.xyz_size]
             latent_vecs = F.dropout(latent_vecs, p=0.2, training=self.training)
             x = torch.cat([latent_vecs, xyz], 1)
         else:
@@ -148,6 +152,9 @@ class DeepSdfDecoderTrainer:
         parser.add_argument('--use_tanh', action='store_true')
         parser.add_argument('--weight_norm', action='store_true')
         parser.add_argument('--latent_dropout', action='store_true')
+        parser.add_argument('--encoding', choices=['none', 'positional'],
+                            default='none')
+        parser.add_argument('--encoding_order', type=int, default=10)
 
         # Training parameters
         parser.add_argument('--num_epochs', type=int, default=2001)
@@ -188,6 +195,10 @@ class DeepSdfDecoderTrainer:
         self.hparams = hparams
 
         # Initialize model
+        if self.encoding == 'none':
+            xyz_size = 3
+        else:
+            xyz_size = 3 * 2 * self.encoding_order
         self.decoder = DeepSdfDecoder(
             self.latent_size,
             self.dims,
@@ -199,6 +210,7 @@ class DeepSdfDecoderTrainer:
             xyz_in_all=self.xyz_in_all,
             use_tanh=self.use_tanh,
             latent_dropout=self.latent_dropout,
+            xyz_size=xyz_size,
         )
         self.latent_vectors = torch.tensor([])  # Dummy value
 
@@ -233,6 +245,19 @@ class DeepSdfDecoderTrainer:
         clamp = lambda x: torch.clamp(x, -self.clamp_dist, self.clamp_dist)
         for i in range(num_train_samples):
             self.train_samples['sdf'][i] = clamp(self.train_samples['sdf'][i])
+
+        # If we use encodings, then do that now
+        if self.encoding == 'positional':
+            t_enc = time()
+            print('Encoding points...') 
+            encoded_points = []
+            for p in train_samples['points']:
+                ep = pos_encoding(p, self.encoding_order)
+                encoded_points.append(ep.view(ep.shape[0], -1))
+
+            train_samples['points'] = torch.stack(encoded_points)
+            t_enc = time() - t_enc
+            print(f'Encoded points in {t_enc:.2f} sec.')
         
         train_index_loader = DataLoader(
             torch.arange(num_train_samples),
@@ -424,7 +449,7 @@ class DeepSdfDecoderTrainer:
         points_per_sample = points.shape[1]
 
         # Reshape and send to device
-        points = points.view(-1, 3).to(self.device)
+        points = points.view(-1, points.shape[-1]).to(self.device)
         sdf = sdf.view(-1, 1).to(self.device)
 
         # Get latent vectors

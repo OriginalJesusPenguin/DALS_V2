@@ -1,6 +1,7 @@
 from typing import Tuple
 
 import numpy as np
+import torch
 
 from scipy.special import sph_harm
 
@@ -43,8 +44,9 @@ def sph_encoding(directions, degree):
     """
     az, el, _ = cart2sph(directions[:, 0], directions[:, 1], directions[:, 2])
     out = []
-    for n in range(degree):
-        for m in range(-n, n):
+    # Add 1 since range is exclusive
+    for n in range(degree + 1):
+        for m in range(-n, n + 1):
             s = sph_harm(m, n, az, el)
             # Convert to real-valued version as described in
             # https://en.wikipedia.org/wiki/Spherical_harmonics#Real_form
@@ -57,4 +59,30 @@ def sph_encoding(directions, degree):
                 
     out = np.stack(out).T
     assert np.all(np.imag(out) == 0)  # Make sure no imaginary values snuck in
-    return np.real(out)
+    return np.real(out).astype('float32')
+
+
+def pos_encoding(x, degree):
+    """
+    Positional encoding with sines and cosines from the NERF paper.
+
+    Uses the encoding from Mildenhall et al., 2020.
+    Encodes 3D positions (assumed normalzed to be in [-1, 1]^3) as
+    (sin(2^0*pi*x), cos(2^0*pi*x), ..., sin(2^(L-1)*pi*x), cos(2^(L-1)*pi*x))
+    where L = degree.
+
+    Args:
+        x: (N, D) Array-like with positions.
+        degree: Max. frequency of encoding.
+
+    Returns:
+        out: (N, D, 2 * degree) Tensor with encoded positions
+    """
+    out = []
+    for d in range(degree):
+        w = np.pi * 2 ** d
+        out.append(torch.sin(w * x))
+        out.append(torch.cos(w * x))
+
+    return torch.stack(out, dim=-1)
+

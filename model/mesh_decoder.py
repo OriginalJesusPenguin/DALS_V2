@@ -175,7 +175,8 @@ class MeshDecoderTrainer:
         parser.add_argument('--decoder_mode', default='gcnn',
                             choices=['gcnn', 'mlp'])
         parser.add_argument('--encoding', default='none',
-                            choices=['none', 'spherical_harmonics'])
+                            choices=['none', 'spherical_harmonics',
+                                     'positional'])
         parser.add_argument('--encoding_order', type=int, default=8)
 
         # Training parameters
@@ -224,6 +225,7 @@ class MeshDecoderTrainer:
         template_subdiv = hparams['template_subdiv']
         if hparams['subdivide']:
             template_subdiv -= hparams['steps'] + 1
+
         self.template = pytorch3d.utils.ico_sphere(template_subdiv)
         self.template.scale_verts_(0.1)
         if hparams['encoding'] == 'spherical_harmonics':
@@ -232,9 +234,16 @@ class MeshDecoderTrainer:
                 hparams['encoding_order'],
             ))
             vert_in_feats = (hparams['encoding_order'] + 1) ** 2
+        elif hparams['encoding'] == 'positional':
+            vert_in_feats = 3 * 2 * hparams['encoding_order']
+            self.template_encoding = pos_encoding(
+                self.template.verts_packed(),
+                hparams['encoding_order'],
+            ).view(-1, vert_in_feats)
         else:  # hparams['encoding'] == 'none'
             self.template_encoding = None
             vert_in_feats = 3
+
         self.decoder = MeshDecoder(
             latent_features=hparams['latent_features'],
             steps=hparams['steps'],
