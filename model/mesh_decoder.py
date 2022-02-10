@@ -30,7 +30,7 @@ from pytorch3d.loss import (
 )
 
 from model.graph_conv import MyGraphConv
-from model.encodings import sph_encoding
+from model.encodings import sph_encoding, pos_encoding
 from util import seed_everything
 
 
