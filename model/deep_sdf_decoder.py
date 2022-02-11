@@ -166,6 +166,9 @@ class DeepSdfDecoderTrainer:
         parser.add_argument('--lr_step', type=int, default=500)
         parser.add_argument('--lr_reduce_factor', type=float, default=0.5)
         parser.add_argument('--subsample_factor', type=int, default=1)
+        parser.add_argument('--subsample_strategy',
+                            choices=['simple', 'less_border'],
+                            default='simple')
 
         # Misc. parameters
         parser.add_argument('--no_checkpoints', action='store_true')
@@ -432,19 +435,20 @@ class DeepSdfDecoderTrainer:
 
         # Subsample if needed
         if self.subsample_factor > 1:
-            # TODO: Maybe pick random subset instead or move subsampling out
-            # start = torch.randint(self.subsample_factor, (1,)).item()
-            # points = points[:, start::self.subsample_factor, :]
-            # sdf = sdf[:, start::self.subsample_factor]
-
-            points = torch.cat([
-                points[:, :500000:self.subsample_factor * 2, :],
-                points[:, 500000::self.subsample_factor // 10, :]
-            ], dim=1)
-            sdf = torch.cat([
-                sdf[:, :500000:self.subsample_factor * 2],
-                sdf[:, 500000::self.subsample_factor // 10]
-            ], dim=1)
+            if self.subsample_strategy == 'simple':
+                start = torch.randint(self.subsample_factor, (1,)).item()
+                points = points[:, start::self.subsample_factor, :]
+                sdf = sdf[:, start::self.subsample_factor]
+            # TODO: Don't use hardcoded numbers here.
+            else:  # self.subsample_strategy == 'less_border':
+                points = torch.cat([
+                    points[:, :500000:self.subsample_factor * 2, :],
+                    points[:, 500000::self.subsample_factor // 10, :]
+                ], dim=1)
+                sdf = torch.cat([
+                    sdf[:, :500000:self.subsample_factor * 2],
+                    sdf[:, 500000::self.subsample_factor // 10]
+                ], dim=1)
 
         points_per_sample = points.shape[1]
 
