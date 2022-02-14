@@ -35,22 +35,36 @@ from util import seed_everything
 
 
 class GraphConvBlock(nn.Module):
-    def __init__(self, in_features, out_features, hidden_features=None):
+    def __init__(self, in_features, out_features, hidden_features=None,
+                 norm='n'):
         super().__init__()
+
+        assert norm in ['n', 'b', 'l']
         
         if hidden_features is None:
             hidden_features = []
-        features = [in_features] + hidden_features + [out_features]
-        self.graph_convs = nn.ModuleList(
-            [MyGraphConv(i, o, normalize=True) for i, o in zip(features[:-1], features[1:])]
+        features = [in_features] + hidden_features
+        self.graph_convs = nn.ModuleList()
+        self.norms = nn.ModuleList()
+        for i, o in zip(features[:-1], features[1:]):
+            self.graph_convs.append(MyGraphConv(i, o, normalize=True))
+            if norm == 'n':
+                self.norms.append(nn.Identity())
+            elif norm == 'b':
+                self.norms.append(nn.BatchNorm1d(o))
+            elif norm == 'l':
+                self.norms.append(nn.LayerNorm(o))
+        self.graph_convs.append(
+            MyGraphConv(features[-1], out_features, normalize=True)
         )
         
         self.activation = nn.ReLU()  # TODO: Make this an input if needed
         
         
     def forward(self, vert_features, edges):
-        for gc in self.graph_convs[:-1]:
+        for gc, norm in zip(self.graph_convs[:-1], self.norms):
             vert_features = gc(vert_features, edges)
+            vert_features = norm(vert_features)
             vert_features = self.activation(vert_features)
             
         vert_features = self.graph_convs[-1](vert_features, edges)
@@ -60,13 +74,16 @@ class GraphConvBlock(nn.Module):
     
 class MeshOffsetBlockGCNN(nn.Module):
     def __init__(self, latent_features, hidden_features=None,
-                 vert_in_features=3, vert_out_features=3):
+                 vert_in_features=3, vert_out_features=3, norm='n'):
         super().__init__()
+
+        assert norm in ['n', 'b', 'l']
         
         self.graph_conv_block = GraphConvBlock(
             vert_in_features + latent_features,
             vert_out_features,
             hidden_features,
+            norm,
         )
         
         
@@ -88,8 +105,10 @@ class MeshOffsetBlockGCNN(nn.Module):
 
 class MeshOffsetBlockMLP(nn.Module):
     def __init__(self, latent_features, hidden_features=None,
-                 vert_in_features=3, vert_out_features=3):
+                 vert_in_features=3, vert_out_features=3, norm='n'):
         super().__init__()
+
+        assert norm in ['n', 'b', 'l']
 
         if hidden_features is None:
             hidden_features = []
@@ -97,6 +116,10 @@ class MeshOffsetBlockMLP(nn.Module):
         mlp = []
         for i, o in zip(features[:-1], features[1:]):
             mlp.append(nn.Linear(i, o))
+            if norm == 'b':
+                mlp.append(nn.BatchNorm1d(o))
+            elif norm == 'l':
+                mlp.append(nn.LayerNorm(o))   
             mlp.append(nn.ReLU())
         mlp.append(nn.Linear(features[-1], vert_out_features))
         self.mlp = nn.Sequential(*mlp)
@@ -120,8 +143,13 @@ class MeshOffsetBlockMLP(nn.Module):
 class MeshDecoder(nn.Module):
     def __init__(self, latent_features, steps, hidden_features=None,
                  subdivide=False, mode='gcnn', vert_in_features=3,
-                 vert_out_features=3):
+                 vert_out_features=3, norm='n'):
         super().__init__()
+
+        if norm not in ['n', 'b', 'l']:
+            raise ValueError(
+                f"norm must be 'n', 'b', or 'l' for (n)one, (b)atch or (l)ayer normalization but was: {norm}"
+            )
 
         mode = mode.lower()
         if mode == 'gcnn':
@@ -141,6 +169,7 @@ class MeshDecoder(nn.Module):
                 hidden_features,
                 vert_in_features,
                 vert_out_features,
+                norm,
             )
             for _ in range(steps)
         ])
@@ -178,6 +207,8 @@ class MeshDecoderTrainer:
                             choices=['none', 'spherical_harmonics',
                                      'positional'])
         parser.add_argument('--encoding_order', type=int, default=8)
+        parser.add_argument('--normalization', default='none',
+                            choices=['none', 'batch', 'layer'])
 
         # Training parameters
         parser.add_argument('--num_epochs', type=int, default=9999)
@@ -251,6 +282,7 @@ class MeshDecoderTrainer:
             subdivide=hparams['subdivide'],
             mode=hparams['decoder_mode'],
             vert_in_features=vert_in_feats,
+            norm=hparams['normalization'][0],
         )
         self.latent_vectors = torch.tensor([])  # Dummy value
 
