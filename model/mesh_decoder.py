@@ -28,6 +28,7 @@ from pytorch3d.loss import (
     mesh_edge_loss,
     mesh_laplacian_smoothing,
 )
+from pytorch3d.transforms import random_rotations
 
 from model.graph_conv import MyGraphConv
 from model.encodings import sph_encoding, pos_encoding
@@ -209,6 +210,7 @@ class MeshDecoderTrainer:
         parser.add_argument('--encoding_order', type=int, default=8)
         parser.add_argument('--normalization', default='none',
                             choices=['none', 'batch', 'layer'])
+        parser.add_argument('--rotate_template', action='store_true')
 
         # Training parameters
         parser.add_argument('--num_epochs', type=int, default=9999)
@@ -251,6 +253,9 @@ class MeshDecoderTrainer:
             hparams[key] = kwargs.get(key, value)
             setattr(self, key, hparams[key])
         self.hparams = hparams
+
+        if hparams['rotate_template'] and hparams['encoding'] != 'none':
+            raise ValueError('random template rotations are not supported for input encodings')
 
         # Initialize model
         template_subdiv = hparams['template_subdiv']
@@ -518,6 +523,11 @@ class MeshDecoderTrainer:
         else:
             templates = self.template_extended
             template_encodings = self.template_encoding_extended
+
+        if self.rotate_template:
+            rot_mats = random_rotations(len(templates), device=templates.device)
+            rot_verts = torch.bmm(templates.verts_padded(), rot_mats)
+            templates = Meshes(rot_verts, templates.faces_padded())
 
         return {
             'target_points': target_points,
