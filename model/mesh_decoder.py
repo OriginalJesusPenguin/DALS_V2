@@ -126,14 +126,17 @@ class MeshOffsetBlockMLP(nn.Module):
         self.mlp = nn.Sequential(*mlp)
 
 
-    def forward(self, meshes, latent_vectors, vert_features=None):
+    def forward(self, meshes, latent_vectors, vert_features=None, expand_lv=True):
         if vert_features is None:
             vert_features = meshes.verts_packed()
         else:
             vf_dim = vert_features.shape[-1]
             vert_features = vert_features.reshape(-1, vf_dim)
 
-        expanded_lv = latent_vectors[meshes.verts_packed_to_mesh_idx()]
+        if expand_lv:
+            expanded_lv = latent_vectors[meshes.verts_packed_to_mesh_idx()]
+        else:
+            expanded_lv = latent_vectors
         vert_features = torch.cat(
             [vert_features, expanded_lv], dim=-1
         )
@@ -176,15 +179,17 @@ class MeshDecoder(nn.Module):
         ])
         
         
-    def forward(self, templates, latent_vectors, template_vert_features=None):
+    def forward(self, templates, latent_vectors, template_vert_features=None,
+                expand_lv=True):
         out = []
         pred = templates
         pred = self.offset_blocks[0](templates, latent_vectors,
-                                     vert_features=template_vert_features)
+                                     vert_features=template_vert_features,
+                                     expand_lv=expand_lv)
         out.append(pred)
         for block in self.offset_blocks[1:]:
             pred = self.subdivide(pred)
-            pred = block(pred, latent_vectors)
+            pred = block(pred, latent_vectors, expand_lv=expand_lv)
             out.append(pred)
         
         return out
