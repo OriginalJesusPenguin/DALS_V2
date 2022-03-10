@@ -201,9 +201,9 @@ class MeshDecoder(nn.Module):
 
         
 class MeshDecoderTrainer:
-    @staticmethod
-    def add_argparse_args(parent_parser):
-        parser = parent_parser.add_argument_group("MeshDecoderTrainer")
+    @classmethod
+    def add_argparse_args(cls, parent_parser):
+        parser = parent_parser.add_argument_group(cls.__name__)
 
         # Model parameters
         parser.add_argument('--latent_features', type=int, default=128)
@@ -246,10 +246,10 @@ class MeshDecoderTrainer:
         return parent_parser
 
     
-    @staticmethod
-    def default_hparams():
+    @classmethod
+    def default_hparams(cls):
         # Build an argparser and parse an empty list to get defualt values
-        default_parser = MeshDecoderTrainer.add_argparse_args(
+        default_parser = cls.add_argparse_args(
             argparse.ArgumentParser()
         )
         return vars(default_parser.parse_args([]))
@@ -257,7 +257,7 @@ class MeshDecoderTrainer:
 
     def __init__(self, device=None, log_wandb=True, **kwargs):
         # Register hyper-parameters
-        hparams = MeshDecoderTrainer.default_hparams()
+        hparams = self.default_hparams()
         for key, value in hparams.items():
             # Override default with provided value if present
             hparams[key] = kwargs.get(key, value)
