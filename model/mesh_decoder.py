@@ -32,6 +32,7 @@ from pytorch3d.transforms import random_rotations
 
 from model.graph_conv import MyGraphConv
 from model.encodings import sph_encoding, pos_encoding
+from model.loss import mesh_bl_quality_loss
 from util import seed_everything
 
 
@@ -229,6 +230,7 @@ class MeshDecoderTrainer:
         parser.add_argument('--weight_norm_loss', type=float, default=1e-3)
         parser.add_argument('--weight_edge_loss', type=float, default=1e-2)
         parser.add_argument('--weight_laplacian_loss', type=float, default=1e-2)
+        parser.add_argument('--weight_quality_loss', type=float, default=0)
         parser.add_argument('--num_mesh_samples', type=int, default=10000)
         parser.add_argument('--train_batch_size', type=int, default=256)
         parser.add_argument('--learning_rate_net', type=float, default=1e-3)
@@ -430,6 +432,7 @@ class MeshDecoderTrainer:
                          + self.weight_normal_loss * losses['normal'] \
                          + self.weight_edge_loss * losses['edge_length'] \
                          + self.weight_laplacian_loss * losses['laplacian'] \
+                         + self.weight_quality_loss * losses['quality'] \
                          + self.weight_norm_loss * ramp * losses['norm']
 
                     loss = loss.mean()
@@ -554,6 +557,7 @@ class MeshDecoderTrainer:
         loss_nl = 0
         loss_el = 0
         loss_la = 0
+        loss_qa = 0
         for pred in preds:
             pred_points, pred_normals = sample_points_from_meshes(
                 pred, self.num_mesh_samples, return_normals=True)
@@ -566,11 +570,13 @@ class MeshDecoderTrainer:
             loss_nl += cf_normal
             loss_el += mesh_edge_loss(pred)
             loss_la += mesh_laplacian_smoothing(pred)
+            loss_qa += mesh_bl_quality_loss(pred)
         
         loss_cf /= num_preds
         loss_nl /= num_preds
         loss_el /= num_preds
         loss_la /= num_preds
+        loss_qa /= num_preds
 
         loss_nm = torch.sum(batch['latent_vectors'] ** 2, dim=1)
 
@@ -579,6 +585,7 @@ class MeshDecoderTrainer:
             'normal': loss_nl,
             'edge_length': loss_el,
             'laplacian': loss_la,
+            'quality': loss_qa,
             'norm': loss_nm,
         }
 
