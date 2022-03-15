@@ -117,8 +117,9 @@ def train_siren_decoder(args):
     # Load data
     t_load = time()
     print('Loading data...')
-    data = load_npz_in_dir(args.data_path, keys=['points', 'sdf'])
-    train_data, val_data = split_dict_data(data, -args.num_val_samples)
+    data = load_meshes_in_dir(args.data_path)
+    train_data = data[:-args.num_val_samples]
+    val_data = data[-args.num_val_samples:]
     t_load = time() - t_load
     print(f'Loaded data in {t_load:.2f} seconds')
 
@@ -127,8 +128,8 @@ def train_siren_decoder(args):
         t_aug = time()
         print('Augmenting data...')
         seed_everything(args.data_random_seed)
-        train_data['points'] = augment_points(
-            train_data['points'],
+        train_data = augment_meshes(
+            train_data,
             num_augment=args.num_augment,
             num_anchor=args.pw_num_anchor,
             sample_type=args.pw_sample_type,
@@ -137,10 +138,6 @@ def train_siren_decoder(args):
             S_range=args.pw_s_range,
             T_range=args.pw_t_range,
             device=args.device,
-        )
-        train_data['sdf'] = train_data['sdf'].repeat_interleave(
-            args.num_augment,
-            dim=0,
         )
         t_aug = time() - t_aug
         print(f'Augmented data in {t_aug:.2f} seconds')

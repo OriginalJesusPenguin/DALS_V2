@@ -13,9 +13,14 @@ import torch.nn as nn
 import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
-
+from pytorch3d.ops import sample_points_from_meshes
+from pytorch3d.structures import (
+    Meshes,
+    join_meshes_as_batch,
+)
 
 from util import seed_everything
+from util.sample import sample_in_ball
 from model.encodings import pos_encoding
 from model.siren.modules import SingleBVPNet
 
@@ -53,16 +58,18 @@ class SirenDecoderTrainer:
         # Training parameters
         parser.add_argument('--num_epochs', type=int, default=10001)
         parser.add_argument('--batch_size', type=int, default=64)
-        parser.add_argument('--clamp_dist', type=float, default=np.inf)
-        parser.add_argument('--weight_latent_norm', type=float, default=1e-4)
+        parser.add_argument('--weight_grad_loss', type=float, default=5e1)
+        parser.add_argument('--weight_zero_set_loss', type=float, default=3e3)
+        parser.add_argument('--weight_normal_align_loss', type=float,
+                            default=1e2)
+        parser.add_argument('--weight_nonzero_set_loss', type=float,
+                            default=1e2)
+        parser.add_argument('--weight_lv_norm', type=float, default=1e-4)
+        parser.add_argument('--num_point_samples', type=int, default=20000)
         parser.add_argument('--learning_rate_net', type=float, default=1e-4)
         parser.add_argument('--learning_rate_lv', type=float, default=1e-4)
         parser.add_argument('--lr_step', type=int, default=500)
         parser.add_argument('--lr_reduce_factor', type=float, default=0.5)
-        parser.add_argument('--subsample_factor', type=int, default=1)
-        parser.add_argument('--subsample_strategy',
-                            choices=['simple', 'less_border'],
-                            default='simple')
 
         # Misc. parameters
         parser.add_argument('--no_checkpoints', action='store_true')
@@ -119,24 +126,37 @@ class SirenDecoderTrainer:
         return self
 
 
-    def train(self, train_samples, val_samples):
-        validate_samples_dict(train_samples)
-        validate_samples_dict(val_samples)
+    def train(self, train_meshes, val_meshes):
         seed_everything(self.random_seed)
+        num_train_samples = len(train_meshes)
 
-        num_train_samples = len(train_samples['sdf'])
-        self.train_samples = train_samples
-        self.val_samples = val_samples
+        t_samp = time()
+        print('Sampling data...')
+        sampling_batch_size = 100  # TODO: Maybe make this a param.
+        self.train_mesh_point_samples = []
+        self.train_mesh_normal_samples = []
+        for ib in range(0, num_train_samples, sampling_batch_size):
+            ie = min(num_train_samples, ib + sampling_batch_size)
+            samples = sample_points_from_meshes(
+                join_meshes_as_batch([m.to(self.device)
+                                      for m in train_meshes[ib:ie]]),
+                num_samples=self.num_point_samples // 2,
+                return_normals=True,
+            )
+            self.train_mesh_point_samples.append(samples[0].cpu())
+            self.train_mesh_normal_samples.append(samples[1].cpu())
 
-        # Pre-clamp all SDF values
-        if np.isfinite(self.clamp_dist):
-            clamp = lambda x: torch.clamp(x, -self.clamp_dist, self.clamp_dist)
-            for i in range(num_train_samples):
-                self.train_samples['sdf'][i] = clamp(
-                    self.train_samples['sdf'][i]
-                )
-        else:
-            clamp = lambda x: x
+        self.train_mesh_point_samples = torch.cat(
+            self.train_mesh_point_samples
+        )
+        self.train_mesh_normal_samples = torch.cat(
+            self.train_mesh_normal_samples
+        )
+        self.train_random_point_samples = sample_in_ball(
+            self.num_point_samples // 2
+        ).to(self.device)  # Shared by all meshes so just store on device
+        t_samp = time() - t_samp 
+        print(f'Sampled data in {t_samp:.2f} seconds')
 
         train_index_loader = DataLoader(
             torch.arange(num_train_samples),
@@ -154,8 +174,6 @@ class SirenDecoderTrainer:
             0.0,
             1.0 / math.sqrt(self.latent_features),
         )
-
-        l1_loss = nn.L1Loss(reduction='sum')
 
         self.optimizer = torch.optim.Adam(
             [
@@ -201,31 +219,33 @@ class SirenDecoderTrainer:
 
                     # Forward
                     t_forward = time()
-                    decoder_input = {
+                    preds = dict()
+                    decoder_input_mesh = {
                         'coords': torch.cat(
-                            [batch['latent_vectors'], batch['points']],
+                            [batch['latent_vectors'], batch['mesh_points']],
                             dim=1
                         )
                     }
-                    decoder_output = self.decoder(decoder_input)
-                    coords = decoder_output['model_in']
-                    pred_sdf = decoder_output['model_out']
+                    preds['mesh'] = self.decoder(decoder_input_mesh)
+                    decoder_input_rand = {
+                        'coords': torch.cat(
+                            [batch['latent_vectors'], batch['random_points']],
+                            dim=1
+                        )
+                    }
+                    preds['random'] = self.decoder(decoder_input_rand)
                     t_forward = time() - t_forward
                     epoch_profile_times['forward'].append(t_forward)
 
                     # Loss
                     t_loss = time()
-                    samples_per_batch = len(batch['points']) / len(batch_idxs)
-                    loss_l1 = l1_loss(pred_sdf, batch['sdf']) \
-                            / samples_per_batch
-
-                    if self.weight_latent_norm != 0:
-                        loss_nm = torch.sum(
-                            torch.norm(batch['latent_vectors'], dim=1)
-                        ) / samples_per_batch
-
+                    losses = self.compute_losses(preds, batch)
                     ramp = min(1.0, epoch / 100.0)
-                    loss = loss_l1 + self.weight_latent_norm * ramp * loss_nm
+                    loss = self.weight_grad_loss * losses['grad'] \
+                         + self.weight_zero_set_loss * losses['zero_set'] \
+                         + self.weight_normal_align_loss * losses['normal_align'] \
+                         + self.weight_nonzero_set_loss * losses['nonzero_set'] \
+                         + self.weight_lv_norm * ramp * losses['lv_norm']
                     t_loss = time() - t_loss
                     epoch_profile_times['loss'].append(t_loss)
 
@@ -240,8 +260,8 @@ class SirenDecoderTrainer:
                     # Accumulate losses
                     t_accum = time()
                     epoch_losses['loss'] += loss
-                    epoch_losses['l1'] += loss_l1
-                    epoch_losses['norm'] += loss_nm
+                    for name, loss_val in losses.items():
+                        epoch_losses[name] += loss_val
                     t_accum = time() - t_accum
                     epoch_profile_times['accum'].append(t_accum)
 
@@ -263,7 +283,7 @@ class SirenDecoderTrainer:
                     # Log
                     if self.log_wandb:
                         wandb.summary['loss'] = self.best_loss
-                        wandb.summary['l1'] = epoch_losses['l1']
+                        wandb.summary['zero_set'] = epoch_losses['zero_set']
                         wandb.summary['best_epoch'] = self.best_epoch
 
                     # Save new best model
@@ -308,41 +328,54 @@ class SirenDecoderTrainer:
 
     def prepare_batch(self, batch_idxs):
         # Get batch
-        points = self.train_samples['points'][batch_idxs]
-        sdf = self.train_samples['sdf'][batch_idxs]
-
-        # Subsample if needed
-        if self.subsample_factor > 1:
-            if self.subsample_strategy == 'simple':
-                start = torch.randint(self.subsample_factor, (1,)).item()
-                points = points[:, start::self.subsample_factor, :]
-                sdf = sdf[:, start::self.subsample_factor]
-            # TODO: Don't use hardcoded numbers here.
-            else:  # self.subsample_strategy == 'less_border':
-                points = torch.cat([
-                    points[:, :500000:self.subsample_factor * 2, :],
-                    points[:, 500000::self.subsample_factor // 10, :]
-                ], dim=1)
-                sdf = torch.cat([
-                    sdf[:, :500000:self.subsample_factor * 2],
-                    sdf[:, 500000::self.subsample_factor // 10]
-                ], dim=1)
-
-        points_per_sample = points.shape[1]
-
-        # Reshape and send to device
-        points = points.view(-1, points.shape[-1]).to(self.device)
-        sdf = sdf.view(-1, 1).to(self.device)
+        mesh_points = self.train_mesh_point_samples[batch_idxs].to(self.device)
+        mesh_points = mesh_points.view(-1, 3)
+        mesh_normals = self.train_mesh_normal_samples[batch_idxs].to(self.device)
+        mesh_normals = mesh_normals.view(-1, 3)
+        random_points = self.train_random_point_samples  # Already on device
+        random_points = random_points.repeat(len(batch_idxs), 1)
 
         # Get latent vectors
+        points_per_sample = self.num_point_samples // 2
         batch_idxs = batch_idxs.to(self.device)
         batch_idxs = batch_idxs.repeat_interleave(points_per_sample)
         latent_vectors = self.latent_vectors(batch_idxs)
 
         return {
-            'points': points,
-            'sdf': sdf,
+            'mesh_points': mesh_points,
+            'mesh_normals': mesh_normals,
+            'random_points': random_points,
             'latent_vectors': latent_vectors,
+        }
+
+
+    def compute_losses(self, preds, batch):
+        mesh_sdf = preds['mesh']['model_out']
+        mesh_coords = preds['mesh']['model_out']
+        rand_sdf = preds['random']['model_out']
+        rand_coords = preds['random']['model_in']
+        
+        grad_mesh = gradient(mesh_sdf, mesh_coords)
+        grad_rand = gradient(rand_sdf, rand_coords)
+        grad_loss = torch.abs(grad_mesh.norm(dim=-1) - 1).sum() \
+                  + torch.abs(grad_rand.norm(dim=-1) - 1).sum()
+        grad_loss /= len(grad_mesh) + len(grad_rand)
+
+        zero_set_loss = torch.abs(mesh_sdf).mean()
+        normal_align_loss = torch.mean(
+            1 - F.cosine_similarity(grad_mesh, batch['mesh_normals'], dim=-1)
+        )
+
+        nonzero_set_loss = torch.exp(-1e2 * rand_sdf.abs()).mean()
+
+        lv_norm_loss = torch.mean(torch.norm(batch['latent_vectors'], dim=1))
+
+        return {
+            'grad': grad_loss,
+            'zero_set': zero_set_loss,
+            'normal_align': normal_align_loss,
+            'nonzero_set': nonzero_set_loss,
+            'lv_norm': lv_norm_loss,
         }
 
 
@@ -360,7 +393,7 @@ class SirenDecoderTrainer:
             'profile_times': self.profile_times,
         }
 
-        fname = f"DeepSdfDecoderTrainer_"
+        fname = type(self).__name__ + '_'
         fname += self.train_start_time.strftime('%Y-%m-%d_%H-%M')
         if len(self.checkpoint_postfix) > 0:
             fname += f'_{self.checkpoint_postfix}'
