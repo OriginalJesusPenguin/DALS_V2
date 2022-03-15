@@ -5,6 +5,7 @@ from time import perf_counter as time
 import wandb
 
 from model.mesh_decoder import MeshDecoderTrainer
+from model.local_mesh_decoder import LocalMeshDecoderTrainer
 from model.deep_sdf_decoder import DeepSdfDecoderTrainer
 from model.siren_decoder import SirenDecoderTrainer
 from util.data import load_meshes_in_dir, load_npz_in_dir, split_dict_data
@@ -53,6 +54,50 @@ def train_mesh_decoder(args):
 
     # Train network
     trainer = MeshDecoderTrainer(log_wandb=(not args.no_wandb), **vars(args))
+    trainer.train(train_data, val_data)
+
+
+def train_local_mesh_decoder(args):
+    # Start logging
+    if not args.no_wandb:
+        wandb.init(
+            project='local-mesh-decoder',
+            entity='patmjen',
+            name=args.experiment_name,
+            config=args,
+            dir=args.checkpoint_dir,
+        )
+
+    # Load data
+    t_load = time()
+    print('Loading data...')
+    data = load_meshes_in_dir(args.data_path)
+    train_data = data[:-args.num_val_samples]
+    val_data = data[-args.num_val_samples:]
+    t_load = time() - t_load
+    print(f'Loaded data in {t_load:.2f} seconds')
+
+    # Augment
+    if args.num_augment > 0:
+        t_aug = time()
+        print('Augmenting data...')
+        seed_everything(args.data_random_seed)
+        train_data = augment_meshes(
+            train_data,
+            num_augment=args.num_augment,
+            num_anchor=args.pw_num_anchor,
+            sample_type=args.pw_sample_type,
+            sigma=args.pw_sigma,
+            R_range=args.pw_r_range,
+            S_range=args.pw_s_range,
+            T_range=args.pw_t_range,
+            device=args.device,
+        )
+        t_aug = time() - t_aug
+        print(f'Augmented data in {t_aug:.2f} seconds')
+
+    # Train network
+    trainer = LocalMeshDecoderTrainer(log_wandb=(not args.no_wandb), **vars(args))
     trainer.train(train_data, val_data)
 
 
@@ -173,6 +218,9 @@ def main(args):
     mesh_decoder_parser = subparsers.add_parser('mesh_decoder')
     MeshDecoderTrainer.add_argparse_args(mesh_decoder_parser)
 
+    local_mesh_decoder_parser = subparsers.add_parser('local_mesh_decoder')
+    LocalMeshDecoderTrainer.add_argparse_args(local_mesh_decoder_parser)
+
     deep_sdf_parser = subparsers.add_parser('deep_sdf')
     DeepSdfDecoderTrainer.add_argparse_args(deep_sdf_parser)
     
@@ -183,6 +231,8 @@ def main(args):
     args = parser.parse_args(args)
     if args.decoder_model == 'mesh_decoder':
         train_mesh_decoder(args)
+    elif args.decoder_model == 'local_mesh_decoder':
+        train_local_mesh_decoder(args)
     elif args.decoder_model == 'deep_sdf':
         train_deep_sdf_decoder(args)
     elif args.decoder_model == 'siren':
