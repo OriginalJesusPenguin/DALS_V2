@@ -220,6 +220,7 @@ class SirenDecoderTrainer:
                     # Forward
                     t_forward = time()
                     preds = dict()
+                    batch['mesh_points'].requires_grad = True
                     decoder_input_mesh = {
                         'coords': torch.cat(
                             [batch['latent_vectors'], batch['mesh_points']],
@@ -227,6 +228,7 @@ class SirenDecoderTrainer:
                         )
                     }
                     preds['mesh'] = self.decoder(decoder_input_mesh)
+                    batch['random_points'].requires_grad = True
                     decoder_input_rand = {
                         'coords': torch.cat(
                             [batch['latent_vectors'], batch['random_points']],
@@ -351,9 +353,9 @@ class SirenDecoderTrainer:
 
     def compute_losses(self, preds, batch):
         mesh_sdf = preds['mesh']['model_out']
-        mesh_coords = preds['mesh']['model_out']
+        mesh_coords = batch['mesh_points']
         rand_sdf = preds['random']['model_out']
-        rand_coords = preds['random']['model_in']
+        rand_coords = batch['random_points']
         
         grad_mesh = gradient(mesh_sdf, mesh_coords)
         grad_rand = gradient(rand_sdf, rand_coords)
@@ -363,7 +365,7 @@ class SirenDecoderTrainer:
 
         zero_set_loss = torch.abs(mesh_sdf).mean()
         normal_align_loss = torch.mean(
-            1 - F.cosine_similarity(grad_mesh, batch['mesh_normals'], dim=-1)
+            1 - F.cosine_similarity(grad_mesh, batch['mesh_normals'].unsqueeze(0), dim=-1)
         )
 
         nonzero_set_loss = torch.exp(-1e2 * rand_sdf.abs()).mean()

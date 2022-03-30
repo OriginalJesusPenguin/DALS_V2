@@ -146,8 +146,8 @@ class SingleBVPNet(MetaModule):
             params = OrderedDict(self.named_parameters())
 
         # Enables us to compute gradients w.r.t. coordinates
-        coords_org = model_input['coords'].clone().detach().requires_grad_(True)
-        # coords_org = model_input['coords']
+        # coords_org = model_input['coords'].clone().detach().requires_grad_(True)
+        coords_org = model_input['coords']
         coords = coords_org
 
         # various input processing methods for different applications
