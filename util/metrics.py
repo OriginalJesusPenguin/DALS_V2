@@ -50,6 +50,8 @@ def point_metrics(
         metrics['Precision@' + t_str] = precision
         metrics['Recall@' + t_str] = recall
         metrics['F1@' + t_str] = f1
+    metrics['Hausdorff'] = max(pred_to_true_dists.max(),
+                               true_to_pred_dists.max())
 
     # Ensure metrics are on the CPU
     metrics = { k: v.cpu() for k, v in metrics.items() }
