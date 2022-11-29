@@ -285,10 +285,11 @@ class MeshDecoderTrainer:
         parser.add_argument('--checkpoint_postfix', type=str, default='')
         parser.add_argument('--checkpoint_dir', type=str, default='.')
         parser.add_argument('--random_seed', type=int, default=1337)
-        
+        parser.add_argument('--resume_from')
+
         return parent_parser
 
-    
+
     @classmethod
     def default_hparams(cls):
         # Build an argparser and parse an empty list to get defualt values
@@ -444,14 +445,20 @@ class MeshDecoderTrainer:
         )
 
         # Run training loop
-        print('Starting training')
-        self.train_start_time = datetime.datetime.now()
-        self.profile_times = defaultdict(list)
-        self.best_loss = np.inf
-        self.best_epoch = -1
-        self.best_epoch_losses = defaultdict(float)
+        if self.resume_from is None:
+            print('Starting training')
+            self.train_start_time = datetime.datetime.now()
+            self.profile_times = defaultdict(list)
+            self.best_loss = np.inf
+            self.best_epoch = -1
+            self.best_epoch_losses = defaultdict(float)
+            start_epoch = 0
+        else:
+            print('Resuming training from checkpoint:', self.resume_from)
+            self.train_start_time = datetime.datetime.now()
+            start_epoch = self.load_checkpoint(self.resume_from)
         try:
-            for epoch in range(self.num_epochs):
+            for epoch in range(start_epoch, self.num_epochs):
                 print(f'Epoch {epoch + 1}')
                 epoch_profile_times = defaultdict(list)
                 epoch_losses = defaultdict(float)
@@ -699,6 +706,22 @@ class MeshDecoderTrainer:
         fname = os.path.join(self.checkpoint_dir, fname)
         print('Saving checkpoint:', fname)
         torch.save(state, fname)
+
+
+    def load_checkpoint(self, fname):
+        state = torch.load(fname)
+        self.decoder.load_state_dict(state['decoder_state_dict'])
+        self.optimizer.load_state_dict(state['optimizer_state_dict'])
+        self.scheduler.load_state_dict(state['scheduler_state_dict'])
+        self.latent_vectors = state['latent_vectors']
+        self.template = state['template']
+        self.hparams = state['hparams']
+        epoch = state['epoch']
+        self.best_epoch = state['best_epoch']
+        self.best_loss = state['best_loss']
+        self.best_epoch_losses = state['best_epoch_losses']
+        self.profile_times = state['profile_times']
+        return epoch
 
 
     def print_training_summary(self):
