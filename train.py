@@ -9,6 +9,7 @@ from model.local_mesh_decoder import LocalMeshDecoderTrainer
 from model.deep_sdf_decoder import DeepSdfDecoderTrainer
 from model.siren_decoder import SirenDecoderTrainer
 from model.siren_decoder_2 import SirenDecoderTrainer as SirenDecoderTrainer2
+from model.local_mod_siren import LocalModSirenDecoderTrainer
 from util.data import load_meshes_in_dir, load_npz_in_dir, split_dict_data
 from util import seed_everything
 from augment.point_wolf import augment_meshes, augment_points
@@ -237,6 +238,50 @@ def train_siren2_decoder(args):
     trainer.train(train_data, val_data)
 
 
+def train_local_mod_siren_decoder(args):
+    # Start logging
+    if not args.no_wandb:
+        wandb.init(
+            project='siren',
+            entity='patmjen',
+            name=args.experiment_name,
+            config=args,
+            dir=args.checkpoint_dir,
+        )
+
+    # Load data
+    t_load = time()
+    print('Loading data...')
+    data = load_meshes_in_dir(args.data_path)
+    train_data = data[:-args.num_val_samples]
+    val_data = data[-args.num_val_samples:]
+    t_load = time() - t_load
+    print(f'Loaded data in {t_load:.2f} seconds')
+
+    # Augment
+    if args.num_augment > 0:
+        t_aug = time()
+        print('Augmenting data...')
+        seed_everything(args.data_random_seed)
+        train_data = augment_meshes(
+            train_data,
+            num_augment=args.num_augment,
+            num_anchor=args.pw_num_anchor,
+            sample_type=args.pw_sample_type,
+            sigma=args.pw_sigma,
+            R_range=args.pw_r_range,
+            S_range=args.pw_s_range,
+            T_range=args.pw_t_range,
+            device=args.device,
+        )
+        t_aug = time() - t_aug
+        print(f'Augmented data in {t_aug:.2f} seconds')
+
+    # Train network
+    trainer = LocalModSirenDecoderTrainer(log_wandb=(not args.no_wandb), **vars(args))
+    trainer.train(train_data, val_data)
+
+
 def main(args):
     parser = argparse.ArgumentParser()
 
@@ -268,12 +313,15 @@ def main(args):
 
     deep_sdf_parser = subparsers.add_parser('deep_sdf')
     DeepSdfDecoderTrainer.add_argparse_args(deep_sdf_parser)
-    
+
     siren_parser = subparsers.add_parser('siren')
     SirenDecoderTrainer.add_argparse_args(siren_parser)
 
     siren2_parser = subparsers.add_parser('siren2')
     SirenDecoderTrainer2.add_argparse_args(siren2_parser)
+
+    local_mod_siren_parser = subparsers.add_parser('local_mod_siren')
+    LocalModSirenDecoderTrainer.add_argparse_args(local_mod_siren_parser)
 
     # Parse and start training
     args = parser.parse_args(args)
@@ -287,6 +335,8 @@ def main(args):
         train_siren_decoder(args)
     elif args.decoder_model == 'siren2':
         train_siren2_decoder(args)
+    elif args.decoder_model == 'local_mod_siren':
+        train_local_mod_siren_decoder(args)
 
 
 if __name__ == '__main__':
