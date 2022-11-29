@@ -35,6 +35,7 @@ from model.graph_conv import MyGraphConv
 from model.encodings import sph_encoding, pos_encoding
 from model.loss import mesh_bl_quality_loss
 from util import seed_everything
+from util.remesh import remesh_template_from_deformed
 
 
 class GraphConvBlock(nn.Module):
@@ -256,6 +257,12 @@ class MeshDecoderTrainer:
         parser.add_argument('--normalization', default='none',
                             choices=['none', 'batch', 'layer'])
         parser.add_argument('--rotate_template', action='store_true')
+        parser.add_argument('--remesh_every', type=int, default=0)
+        parser.add_argument('--remesh_every_edge_length_ratio', type=float,
+                            default=1.0)
+        parser.add_argument('--remesh_at', type=int, nargs='*', default=[])
+        parser.add_argument('--remesh_at_edge_length_ratio', type=float,
+                            nargs='*', default=[])
 
         # Training parameters
         parser.add_argument('--num_epochs', type=int, default=9999)
@@ -300,8 +307,18 @@ class MeshDecoderTrainer:
             setattr(self, key, hparams[key])
         self.hparams = hparams
 
+        # Extra input validation
         if hparams['rotate_template'] and hparams['encoding'] != 'none':
             raise ValueError('random template rotations are not supported for input encodings')
+
+        if self.remesh_every <= 0:
+            self.remesh_every = self.num_epochs + 1
+
+        if len(self.remesh_at_edge_length_ratio) != len(self.remesh_at):
+            if len(self.remesh_at_edge_length_ratio) == 0:
+                self.remesh_at_edge_length_ratio = [1.0] * len(self.remesh_at)
+            else:
+                raise ValueError(f'if remesh_at is specified then remesh_at_edge_length_ratio must either be empty or have same length as remesh_at')
 
         # Initialize model
         template_subdiv = hparams['template_subdiv']
@@ -490,6 +507,24 @@ class MeshDecoderTrainer:
                     t_accum = time() - t_accum
                     epoch_profile_times['accum'].append(t_accum)
 
+                # Remesh template if time
+                if (epoch + 1) % self.remesh_every == 0:
+                    t_remesh = time()
+                    self._remesh_template_from_mean_shape(
+                        self.remesh_every_edge_length_ratio
+                    )
+                    t_remesh = time() - t_remesh
+                    self.profile_times['remesh'].append(t_remesh)
+
+                if (epoch + 1) in self.remesh_at:
+                    ra_idx = self.remesh_at.index[epoch + 1]
+                    ratio = self.remesh_at_edge_length_ratio[ra_idx]
+                    t_remesh = time()
+                    self._remesh_template_from_mean_shape(ratio)
+                    t_remesh = time() - t_remesh
+                    self.profile_times['remesh'].append(t_remesh)
+
+
                 # Compute mean epoch losses
                 for name in epoch_losses.keys():
                     epoch_losses[name] /= num_epoch_batches
@@ -550,6 +585,22 @@ class MeshDecoderTrainer:
         # Print closing summary
         print('Training finished')
         self.print_training_summary()
+
+
+    def _remesh_template_from_mean_shape(self, edge_length_ratio):
+        with torch.no_grad():
+            mean_lv = self.latent_vectors.weight.data.detach()
+            mean_lv = mean_lv.mean(dim=0).unsqueeze(0)
+            mean_mesh = self.decoder(self.template, mean_lv)[-1]
+            self.template = remesh_template_from_deformed(
+                mean_mesh,
+                self.template,
+                ratio=edge_length_ratio,
+            )
+        # Since the template is now denser in some regions to
+        # accomodate the deformed geometry, we can't do random
+        # rotations anymore
+        self.rotate_template = False
 
 
     def prepare_batch(self, batch_idxs):
