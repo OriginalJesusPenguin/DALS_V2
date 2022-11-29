@@ -7,6 +7,42 @@ from pytorch3d.structures import Meshes
 import plotly.graph_objects as go
 
 
+def quiver_3d(
+    points: torch.Tensor,
+    arrows: torch.Tensor,
+    fig: Optional[go.Figure] = None,
+    fig_kwargs: Optional[Dict] = None,
+    **kwargs
+) -> go.Figure:
+    assert points.ndim == 2
+    assert points.shape[1] == 3
+    assert points.shape == arrows.shape
+
+    if fig is None:
+        fig = go.Figure()
+
+    if fig_kwargs is None:
+        fig_kwargs = dict()
+
+    if 'marker' not in kwargs:
+        kwargs = {
+            'marker': {
+                'symbol': 'circle',
+                'size': 0.1,
+            }
+        }
+
+    plot_edges = torch.empty((3 * len(points), 3))
+    plot_edges[0::3, :] = points
+    plot_edges[1::3, :] = points + arrows
+    plot_edges[2::3, :] = np.nan
+    fig.add_trace(
+        go.Scatter3d(x=plot_edges[:, 0], y=plot_edges[:, 1], z=plot_edges[:, 2], **kwargs),
+        **fig_kwargs
+    )
+    return fig
+
+
 def plot_wireframe(
     verts: torch.Tensor,
     faces: torch.Tensor,
