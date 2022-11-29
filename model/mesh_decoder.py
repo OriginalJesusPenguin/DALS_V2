@@ -12,6 +12,7 @@ import numpy as np
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch.utils.data import DataLoader
 
 import pytorch3d.utils
@@ -42,7 +43,7 @@ class GraphConvBlock(nn.Module):
         super().__init__()
 
         assert norm in ['n', 'b', 'l']
-        
+
         if hidden_features is None:
             hidden_features = []
         features = [in_features] + hidden_features
@@ -59,36 +60,36 @@ class GraphConvBlock(nn.Module):
         self.graph_convs.append(
             MyGraphConv(features[-1], out_features, normalize=True)
         )
-        
+
         self.activation = nn.ReLU()  # TODO: Make this an input if needed
-        
-        
+
+
     def forward(self, vert_features, edges):
         for gc, norm in zip(self.graph_convs[:-1], self.norms):
             vert_features = gc(vert_features, edges)
             vert_features = norm(vert_features)
             vert_features = self.activation(vert_features)
-            
+
         vert_features = self.graph_convs[-1](vert_features, edges)
-        
+
         return vert_features
-    
-    
+
+
 class MeshOffsetBlockGCNN(nn.Module):
     def __init__(self, latent_features, hidden_features=None,
                  vert_in_features=3, vert_out_features=3, norm='n'):
         super().__init__()
 
         assert norm in ['n', 'b', 'l']
-        
+
         self.graph_conv_block = GraphConvBlock(
             vert_in_features + latent_features,
             vert_out_features,
             hidden_features,
             norm,
         )
-        
-        
+
+
     def forward(self, meshes, latent_vectors, vert_features=None,
                 expand_lv=True):
         if vert_features is None:
@@ -96,7 +97,7 @@ class MeshOffsetBlockGCNN(nn.Module):
         else:
             vf_dim = vert_features.shape[-1]
             vert_features = vert_features.reshape(-1, vf_dim)
-        
+
         if expand_lv:
             expanded_lv = latent_vectors[meshes.verts_packed_to_mesh_idx()]
         else:
@@ -109,26 +110,52 @@ class MeshOffsetBlockGCNN(nn.Module):
         return meshes.offset_verts(offsets.view(-1, 3))
 
 
-class MeshOffsetBlockMLP(nn.Module):
-    def __init__(self, latent_features, hidden_features=None,
-                 vert_in_features=3, vert_out_features=3, norm='n'):
+class MLP(nn.Sequential):
+    def __init__(self, features, norm='n'):
         super().__init__()
 
         assert norm in ['n', 'b', 'l']
 
+        for i, o in zip(features[:-2], features[1:-1]):
+            self.append(nn.Linear(i, o))
+            if norm == 'b':
+                self.append(nn.BatchNorm1d(o))
+            elif norm == 'l':
+                self.append(nn.LayerNorm(o))
+            self.append(nn.ReLU())
+        self.append(nn.Linear(features[-2], features[-1]))
+
+
+    def append(self, module):
+        self.add_module(str(len(self)), module)
+        return self
+
+
+class MeshOffsetBlockMLP(nn.Module):
+    def __init__(self, latent_features, hidden_features=None,
+                 vert_in_features=3, vert_out_features=3, norm='n',
+                 concat_latent_at=None):
+        super().__init__()
+
+        assert norm in ['n', 'b', 'l']
+        if concat_latent_at is None:
+            concat_latent_at = []
+        feature_runs = [0] + concat_latent_at + [None]
+
         if hidden_features is None:
             hidden_features = []
-        features = [vert_in_features + latent_features] + hidden_features
-        mlp = []
-        for i, o in zip(features[:-1], features[1:]):
-            mlp.append(nn.Linear(i, o))
-            if norm == 'b':
-                mlp.append(nn.BatchNorm1d(o))
-            elif norm == 'l':
-                mlp.append(nn.LayerNorm(o))   
-            mlp.append(nn.ReLU())
-        mlp.append(nn.Linear(features[-1], vert_out_features))
-        self.mlp = nn.Sequential(*mlp)
+        features = [vert_in_features] + hidden_features \
+                 + [vert_out_features]
+
+        mlps = []
+        for b, e in zip(feature_runs[:-1], feature_runs[1:]):
+            if e is not None:
+                e += 1
+            f = features[b:e]
+            f[0] += latent_features
+            mlps.append(MLP(f, norm=norm))
+
+        self.mlps = nn.ModuleList(mlps)
 
 
     def forward(self, meshes, latent_vectors, vert_features=None,
@@ -143,17 +170,19 @@ class MeshOffsetBlockMLP(nn.Module):
             expanded_lv = latent_vectors[meshes.verts_packed_to_mesh_idx()]
         else:
             expanded_lv = latent_vectors
-        vert_features = torch.cat(
-            [vert_features, expanded_lv], dim=-1
-        )
-        offsets = self.mlp(vert_features)
-        return meshes.offset_verts(offsets.view(-1, 3))
-    
-    
+
+        for mlp in self.mlps:
+            vert_features = torch.cat(
+                [vert_features, expanded_lv], dim=-1
+            )
+            vert_features = F.relu(mlp(vert_features))
+        return meshes.offset_verts(vert_features.view(-1, 3))
+
+
 class MeshDecoder(nn.Module):
     def __init__(self, latent_features, steps, hidden_features=None,
                  subdivide=False, mode='gcnn', vert_in_features=3,
-                 vert_out_features=3, norm='n'):
+                 vert_out_features=3, norm='n', concat_latent_at=None):
         super().__init__()
 
         if norm not in ['n', 'b', 'l']:
@@ -164,11 +193,13 @@ class MeshDecoder(nn.Module):
         mode = mode.lower()
         if mode == 'gcnn':
             MeshOffsetBlock = MeshOffsetBlockGCNN
+            if concat_latent_at is not None:
+                raise ValueError('concat_latent_at is not supported for GCNN')
         elif mode == 'mlp':
             MeshOffsetBlock = MeshOffsetBlockMLP
         else:
             raise ValueError(f"mode must be 'gcnn' or 'mlp' but was: {mode}")
-        
+
         if subdivide:
             self.subdivide = SubdivideMeshes()
         else:
@@ -180,11 +211,12 @@ class MeshDecoder(nn.Module):
                 vert_in_features,
                 vert_out_features,
                 norm,
+                concat_latent_at=concat_latent_at,
             )
             for _ in range(steps)
         ])
-        
-        
+
+
     def forward(self, templates, latent_vectors, template_vert_features=None,
                 expand_lv=True):
         out = []
@@ -197,10 +229,10 @@ class MeshDecoder(nn.Module):
             pred = self.subdivide(pred)
             pred = block(pred, latent_vectors, expand_lv=expand_lv)
             out.append(pred)
-        
+
         return out
 
-        
+
 class MeshDecoderTrainer:
     @classmethod
     def add_argparse_args(cls, parent_parser):
@@ -212,6 +244,8 @@ class MeshDecoderTrainer:
         parser.add_argument('--subdivide', type=bool, default=False)
         parser.add_argument('--hidden_features', type=int, nargs='+',
                             default=[256, 256, 128])
+        parser.add_argument('--concat_latent_at', type=int, nargs='*',
+                            default=[])
         parser.add_argument('--template_subdiv', type=int, default=3)
         parser.add_argument('--decoder_mode', default='gcnn',
                             choices=['gcnn', 'mlp'])
@@ -296,6 +330,7 @@ class MeshDecoderTrainer:
             latent_features=hparams['latent_features'],
             steps=hparams['steps'],
             hidden_features=hparams['hidden_features'],
+            concat_latent_at=hparams['concat_latent_at'],
             subdivide=hparams['subdivide'],
             mode=hparams['decoder_mode'],
             vert_in_features=vert_in_feats,
@@ -347,7 +382,7 @@ class MeshDecoderTrainer:
 
         self.train_point_samples = torch.cat(self.train_point_samples)
         self.train_normal_samples = torch.cat(self.train_normal_samples)
-        t_samp = time() - t_samp 
+        t_samp = time() - t_samp
         print(f'Sampled data in {t_samp:.2f} seconds')
 
         train_index_loader = DataLoader(
@@ -361,7 +396,7 @@ class MeshDecoderTrainer:
             max_norm=1.0,
             device=self.device,
         )
-        
+
         # Extending the template is slow so precomute it here
         self.template_extended = self.template.extend(self.batch_size)
         if self.template_encoding is not None:
@@ -509,7 +544,7 @@ class MeshDecoderTrainer:
             else:
                 print('All epochs done')
         except KeyboardInterrupt:
-            print('Keyboard interrupt')   
+            print('Keyboard interrupt')
             self.num_epochs = epoch + 1
 
         # Print closing summary
@@ -571,7 +606,7 @@ class MeshDecoderTrainer:
             loss_el += mesh_edge_loss(pred)
             loss_la += mesh_laplacian_smoothing(pred)
             loss_qa += mesh_bl_quality_loss(pred)
-        
+
         loss_cf /= num_preds
         loss_nl /= num_preds
         loss_el /= num_preds
