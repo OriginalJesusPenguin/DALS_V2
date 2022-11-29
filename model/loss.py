@@ -5,7 +5,7 @@ from pytorch3d.structures import Meshes
 
 
 def mesh_bl_quality_loss(
-    meshes: Meshes, 
+    meshes: Meshes,
     reduction: str = 'mean',
     eps=1e-8,
 ) -> torch.Tensor:
@@ -52,4 +52,55 @@ def mesh_bl_quality_loss(
         loss /= len(face_areas)
 
     return 1.0 - loss
+
+
+def mesh_edge_loss_highdim(meshes, vert_features, target_length: float = 0.0):
+    """
+    Modified version of pytorch3d.loss.mesh_edge_loss which bases the edge
+    lengths on a tensor of vertex features.
+
+    Args:
+        meshes: Meshes object with a batch of meshes.
+        vert_features: (sum(V_n), D) with vertex features.
+        target_length: Resting value for the edge length.
+
+    Returns:
+        loss: Average loss across the batch. Returns 0 if meshes contains
+        no meshes or all empty meshes.
+    """
+    if meshes.isempty():
+        return torch.tensor(
+            [0], dtype=torch.float32, device=meshes.device, requires_grad=True
+        )
+
+    N = len(meshes)
+    edges_packed = meshes.edges_packed()  # (sum(E_n), 3)
+    verts_packed = vert_features  # (sum(V_n), D)
+    edge_to_mesh_idx = meshes.edges_packed_to_mesh_idx()  # (sum(E_n), )
+    num_edges_per_mesh = meshes.num_edges_per_mesh()  # N
+
+    # Determine the weight for each edge based on the number of edges in the
+    # mesh it corresponds to.
+    # TODO (nikhilar) Find a faster way of computing the weights for each edge
+    # as this is currently a bottleneck for meshes with a large number of faces.
+    weights = num_edges_per_mesh.gather(0, edge_to_mesh_idx)
+    weights = 1.0 / weights.float()
+
+    verts_edges = verts_packed[edges_packed]
+    v0, v1 = verts_edges.unbind(1)
+    loss = ((v0 - v1).norm(dim=1, p=2) - target_length) ** 2.0
+    loss = loss * weights
+
+    return loss.sum() / N
+
+def mesh_laplacian_loss_highdim(meshes, vert_features, p=2):
+    assert p >= 1
+    L = meshes.laplacian_packed()
+    Lx = vert_features
+    for i in range(p):
+        Lx = L.mm(Lx)
+    loss = torch.sum(vert_features * Lx)
+    #loss = L.mm(vert_features)
+    #loss = torch.sum(loss ** 2)
+    return loss
 
