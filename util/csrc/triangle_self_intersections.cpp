@@ -6,6 +6,7 @@
 #define CHECK_2D(x) TORCH_CHECK((x).dim() == 2, #x " must be 2D but was ", (x).dim(), "D")
 #define CHECK_DIM(x, d, v) TORCH_CHECK((x).size(d) == (v), \
                                        #x " must have size ", v, " in dim ", d, " but was ", (x).size(d))
+#define CHECK_CPU(x) TORCH_CHECK((x).is_cpu(), #x " must be a CPU tensor")
 
 #define COPY3(TGT, SRC) \
     TGT[0] = SRC[0];    \
@@ -271,9 +272,10 @@ torch::Tensor triangle_self_intersections(
     torch::Tensor verts,
     torch::Tensor faces)
 {
+    CHECK_CPU(verts);
+    CHECK_CPU(faces);
     CHECK_2D(verts);
     CHECK_2D(faces);
-
     CHECK_DIM(verts, 1, 3);
     CHECK_DIM(faces, 1, 3);
 

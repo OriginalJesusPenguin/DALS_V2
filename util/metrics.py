@@ -81,6 +81,8 @@ def self_intersections(meshes: Meshes):
     # to 32-bit since that's enough and will make Torch happy.
     faces = meshes.faces_packed().to(torch.int32)
 
+    assert (not verts.is_cuda) and (not faces.is_cuda), "meshes must be on CPU"
+
     intersecting_faces = _C_tri.triangle_self_intersections(verts, faces)
 
     int_faces_per_mesh = torch.zeros(
