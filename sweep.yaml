@@ -1,6 +1,6 @@
 project: 'mesh-decoder'
 entity: 'patmjen'
-name: 'spherical harmonics encoding order'
+name: 'decoder mode and spherical harmonics encoding order'
 program: agent_train_wrapper.py
 method: grid 
 metric:
@@ -15,13 +15,15 @@ parameters:
     data_path:
         value: '/work1/patmjen/meshfit/datasets/shapes/liver/raw/'
     num_epochs:
-        value: 8000
+        value: 7000
     num_mesh_augment:
         value: 50
     encoding:
         value: spherical_harmonics
     encoding_order:
         values: [2, 4, 6, 8, 10]
+    decoder_mode:
+        values: ['gcnn', 'mlp']
     learning_rate_net:
         value: 2.0e-3
     learning_rate_lv:
@@ -33,9 +35,9 @@ parameters:
     weight_normal_loss:
         value: 0.0 
     weight_edge_loss:
-        value: 0.0
+        value: 1.0e-4
     weight_laplacian_loss:
-        value: 0.0
+        value: 1.0e-4
     weight_norm_loss:
         value: 1.0e-3
 
