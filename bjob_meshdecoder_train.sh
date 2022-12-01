@@ -55,32 +55,32 @@ find . -type f -name "*.py" -o -name "*.sh" -o -name "*.yaml" | xargs -i cp --pa
 # Ensure CUDA_VISIBLE_DEVICES is set to something
 export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0}
 
-    # --data_path="/work1/patmjen/meshfit/datasets/shapes/liver/raw/" \
+    # --data_path="/work1/patmjen/meshfit/datasets/shapes/organs/raw/" \
 
 python -u train.py \
-    --data_path="/work1/patmjen/meshfit/datasets/shapes/ShapeNetV2/planes" \
-    --num_augment=0 \
-    --num_val_samples=40 \
+    --data_path="/work1/patmjen/meshfit/datasets/shapes/ShapeNetV2/cars" \
+    --num_augment=5 \
+    --num_val_samples=500 \
     --experiment_name="MD${EXP_POSTFIX}/${TRIAL_ID}" \
     mesh_decoder \
     --checkpoint_postfix=${EXP_POSTFIX} \
     --checkpoint_dir=${EXP_DIR} \
     --decoder_mode="mlp" \
     --encoding="none" \
-    --encoding_order=8 \
     --num_epochs=99999 \
-    --latent_features=128 \
+    --latent_features=256 \
     --learning_rate_net=2e-3 \
     --learning_rate_lv=2e-3 \
     --lr_reduce_factor=0.5 \
     --lr_reduce_min_lr=1e-5 \
-    --weight_normal_loss=0 \
+    --weight_normal_loss=1e-4 \
     --weight_edge_loss=0 \
     --weight_laplacian_loss=0 \
-    --weight_quality_loss=1e-4 \
+    --weight_quality_loss=1e-1 \
     --weight_norm_loss=1e-3 \
-    --template_subdiv=3 \
-    --hidden_features 512 512 512 256 \
+    --template_subdiv=4 \
+    --hidden_features 512 512 512 256 512 512 512 \
+    --concat_latent_at 4 \
     --normalization="layer" \
     --rotate_template \
 

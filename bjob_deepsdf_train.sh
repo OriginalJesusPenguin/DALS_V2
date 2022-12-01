@@ -55,19 +55,20 @@ find . -type f -name "*.py" -o -name "*.sh" -o -name "*.yaml" | xargs -i cp --pa
 # Ensure CUDA_VISIBLE_DEVICES is set to something
 export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0}
 
+    # --data_path="/work1/patmjen/meshfit/datasets/sdf/liver3/raw/" \
+
 python -u train.py \
-    --data_path="/work1/patmjen/meshfit/datasets/sdf/liver/raw/" \
+    --data_path="/work1/patmjen/meshfit/datasets/sdf/ShapeNetV2/cars" \
     --num_augment=0 \
+    --num_val_samples=40 \
     --experiment_name="DS${EXP_POSTFIX}/${TRIAL_ID}" \
     deep_sdf \
     --checkpoint_postfix=${EXP_POSTFIX} \
     --checkpoint_dir=${EXP_DIR} \
-    --num_epochs=6000 \
+    --num_epochs=99999 \
     --batch_size=32 \
     --subsample_factor=100 \
     --learning_rate_net=1e-4 \
-    --dims 512 512 512 512 512 \
-    --norm_layers 0 1 2 3 4 \
-    --latent_in 2 \
     --dropout \
+    --encoding="none" \
 

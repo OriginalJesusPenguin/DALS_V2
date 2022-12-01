@@ -58,9 +58,9 @@ export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0}
     # --data_path="/work1/patmjen/meshfit/datasets/shapes/liver/raw/" \
 
 python -u train.py \
-    --data_path="/work1/patmjen/meshfit/datasets/shapes/ShapeNetV2/planes" \
-    --num_augment=0 \
-    --num_val_samples=40 \
+    --data_path="/work1/patmjen/meshfit/datasets/shapes/spleen/raw" \
+    --num_augment=100 \
+    --num_val_samples=10 \
     --experiment_name="SM${EXP_POSTFIX}/${TRIAL_ID}" \
     siren2 \
     --checkpoint_postfix=${EXP_POSTFIX} \

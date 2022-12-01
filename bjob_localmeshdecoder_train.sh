@@ -66,8 +66,6 @@ python -u train.py \
     --checkpoint_postfix=${EXP_POSTFIX} \
     --checkpoint_dir=${EXP_DIR} \
     --decoder_mode="mlp" \
-    --encoding="none" \
-    --encoding_order=8 \
     --num_epochs=99999 \
     --latent_features=12 \
     --learning_rate_net=2e-3 \
@@ -75,9 +73,9 @@ python -u train.py \
     --lr_reduce_factor=0.5 \
     --lr_reduce_min_lr=1e-5 \
     --weight_normal_loss=0 \
-    --weight_edge_loss=0 \
-    --weight_laplacian_loss=0 \
-    --weight_quality_loss=1e-4 \
+    --weight_edge_loss=1e-4 \
+    --weight_laplacian_loss=1e-4 \
+    --weight_quality_loss=1e-3 \
     --weight_norm_loss=1e-3 \
     --template_subdiv=3 \
     --hidden_features 512 512 512 256 \

@@ -58,7 +58,7 @@ export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0}
     # --data_path="/work1/patmjen/meshfit/datasets/shapes/ShapeNetV2/planes" \
 
 python -u train.py \
-    --data_path="/work1/patmjen/meshfit/datasets/shapes/liver/raw/" \
+    --data_path="/work1/patmjen/meshfit/datasets/shapes/spleen/raw/" \
     --num_augment=100 \
     --num_val_samples=40 \
     --experiment_name="SI${EXP_POSTFIX}/${TRIAL_ID}" \
@@ -66,8 +66,9 @@ python -u train.py \
     --checkpoint_postfix=${EXP_POSTFIX} \
     --checkpoint_dir=${EXP_DIR} \
     --num_epochs=99999 \
-    --batch_size=8 \
-    --num_point_samples=1500 \
+    --batch_size=16 \
+    --num_point_samples=20000 \
     --learning_rate_net=1e-4 \
-    --learning_rate_lv=1e-5 \
+    --learning_rate_lv=1e-4 \
+    --weight_lv_norm=1e2 \
 
