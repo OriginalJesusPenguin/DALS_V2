@@ -67,6 +67,9 @@ def train_conv_net(args):
     train_data = dict_unzip(train_data)
     val_data = dict_unzip(val_data)
 
+    train_data = train_data[args.train_subset[0]:args.train_subset[1]]
+    val_data = val_data[args.val_subset[0]:args.val_subset[1]]
+
     t_load = time() - t_load
     print(f'Loaded data in {t_load:.2f} seconds')
 
@@ -85,6 +88,10 @@ def main(argv):
     data_parser = parser.add_argument_group('Data')
     data_parser.add_argument('--train_data_path', type=str)
     data_parser.add_argument('--val_data_path', type=str)
+    data_parser.add_argument('--train_subset', type=int, nargs=2,
+                             default=[0, -1])
+    data_parser.add_argument('--val_subset', type=int, nargs=2,
+                             default=[0, -1])
     data_parser.add_argument('--simulate_slice_annot', action='store_true')
     data_parser.add_argument('--slicing_mode', choices=['center', 'random'],
                              default='random')
@@ -95,6 +102,9 @@ def main(argv):
     ConvNetTrainer.add_argparse_args(conv_net_parser)
 
     args = parser.parse_args(argv)
+    for k, v in vars(args).items():
+        print(k, ':', v)
+
     if args.segmentation_model == 'conv_net':
         train_conv_net(args)
     else:
