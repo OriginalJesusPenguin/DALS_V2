@@ -9,7 +9,12 @@ import numpy as np
 import torch
 import torch.nn as nn
 
-from monai.networks.nets import UNet  # DEBUG
+from monai.networks.nets import (
+    UNet,
+    VNet,
+    DynUNet,
+    UNETR,
+)
 from monai.data import (
     CacheDataset,
     ThreadDataLoader,
@@ -24,6 +29,7 @@ from monai.transforms import (
     ToDeviced,
     EnsureTyped,
     EnsureType,
+    KeepLargestConnectedComponent,
 )
 
 import wandb
@@ -31,51 +37,27 @@ import wandb
 from util import seed_everything
 
 
-class ConvStep(nn.Sequential):
-    """Convolution step. Conv -> Norm -> Act."""
-    def __init__(self, channels_in, channels_out, act=True, norm=True):
-        super().__init__()
-        self.add_module('Conv', nn.Conv3d(channels_in, channels_out,
-                                          kernel_size=3, padding=1))
-        if act:
-            self.add_module('Act', nn.PReLU())
-        if norm:
-            self.add_module('Norm', nn.InstanceNorm3d(channels_out))
+def _get_kernels_strides(sizes, spacings):
+    # From MONAI DynUNet examaple
+    # https://github.com/Project-MONAI/tutorials/blob/master/modules/dynunet_pipeline/create_network.py
+    strides, kernels = [], []
 
-
-class ConvBlock(nn.Module):
-    def __init__(self, channels, residual=True):
-        super().__init__()
-        self.residual = residual
-        self.block_net = nn.Sequential()
-        for i, (c_in, c_out) in enumerate(zip(channels[:-1], channels[1:])):
-            self.block_net.add_module(f'ConvStep{i}', ConvStep(c_in, c_out))
-
-
-    def forward(self, x):
-        cx = self.block_net(x)
-        if self.residual:
-            return cx + x
-        else:
-            return cx
-
-
-class ConvNet(nn.Sequential):
-    def __init__(
-        self,
-        in_channels,
-        out_channels,
-        block_channels,
-        num_blocks,
-        residual=True
-    ):
-        super().__init__()
-        self.add_module('InConv', nn.Conv3d(in_channels, block_channels[0],
-                                            kernel_size=1, padding=1))
-        for i in range(num_blocks):
-            self.add_module(f'Block{i}', ConvBlock(block_channels, residual))
-        self.add_module('OutConv', nn.Conv3d(block_channels[-1], out_channels,
-                                             kernel_size=1, padding=1))
+    while True:
+        spacing_ratio = [sp / min(spacings) for sp in spacings]
+        stride = [
+            2 if ratio <= 2 and size >= 8 else 1
+            for (ratio, size) in zip(spacing_ratio, sizes)
+        ]
+        kernel = [3 if ratio <= 2 else 1 for ratio in spacing_ratio]
+        if all(s == 1 for s in stride):
+            break
+        sizes = [i / j for i, j in zip(sizes, stride)]
+        spacings = [i * j for i, j in zip(spacings, stride)]
+        kernels.append(kernel)
+        strides.append(stride)
+    strides.insert(0, len(spacings) * [1])
+    kernels.append(len(spacings) * [3])
+    return kernels, strides
 
 
 class ConvNetTrainer:
@@ -84,9 +66,13 @@ class ConvNetTrainer:
         parser = parent_parser.add_argument_group(cls.__name__)
 
         # Model parameters
-        parser.add_argument('--block_channels', type=int, nargs='+',
-                            default=[16, 16])
-        parser.add_argument('--num_blocks', type=int, default=1)
+        parser.add_argument('--model', default='ResUNet',
+                            choices=['ResUNet', 'VNet', 'DynUNet', 'UNETR'])
+        # TODO: Find better to take sizes as arguments that checks the input
+        parser.add_argument('--data_size', type=int, nargs='+',
+                            default=[256, 256, 256])
+        parser.add_argument('--data_spacing', type=float, nargs='+',
+                            default=[1.0, 1.0, 1.0])
 
         # Training parameters
         parser.add_argument('--num_epochs', type=int, default=99999)
@@ -122,21 +108,53 @@ class ConvNetTrainer:
         self.hparams = hparams
         self.log_wandb = log_wandb
 
-        # Initialize model
-        #self.model = ConvNet(
-        #    in_channels=1,
-        #    out_channels=1,
-        #    block_channels=self.block_channels,
-        #    num_blocks=self.num_blocks,
-        #).to(device)
-        self.model = UNet(
-            spatial_dims=3,
-            in_channels=1,
-            out_channels=2,
-            channels=(16, 32, 64, 128, 256),
-            strides=(2, 2, 2, 2),
-            num_res_units=2,
-        ).to(device)
+        if self.model == 'ResUNet':
+            self.model = UNet(
+                spatial_dims=3,
+                in_channels=1,
+                out_channels=2,
+                channels=(16, 32, 64, 128, 256),
+                strides=(2, 2, 2, 2),
+                num_res_units=2,
+            )
+        elif self.model == 'VNet':
+            self.model = VNet(
+                spatial_dims=3,
+                in_channels=1,
+                out_channels=2,
+            )
+        elif self.model == 'DynUNet':
+            # TODO: Get data size as input
+            kernels, strides = _get_kernels_strides(
+                self.data_size,
+                self.data_spacing,
+            )
+            self.model = DynUNet(
+                spatial_dims=3,
+                in_channels=1,
+                out_channels=2,
+                kernel_size=kernels,
+                strides=strides,
+                upsample_kernel_size=strides[1:],
+                norm_name='instance',
+                # TODO: Do deep supervision
+            )
+        elif self.model == 'UNETR':
+            # From MONAI UNETR tutorial:
+            # https://github.com/Project-MONAI/tutorials/blob/master/3d_segmentation/unetr_btcv_segmentation_3d.ipynb
+            self.model = UNETR(
+                in_channels=1,
+                out_channels=2,
+                img_size=self.data_size,
+                feature_size=16,
+                hidden_size=768//2,
+                mlp_dim=3072//2,
+                num_heads=12//2,
+                pos_embed="conv",
+                norm_name="instance",
+                res_block=True,
+                dropout_rate=0.0,
+            )
         if device is None:
             device = torch.device('cpu')
         else:
@@ -161,12 +179,12 @@ class ConvNetTrainer:
         train_transforms = Compose([
             AddChanneld(keys=all_train_keys),
             EnsureTyped(keys=all_train_keys),
-            ToDeviced(keys=all_train_keys, device=self.device),
+            #ToDeviced(keys=all_train_keys, device=self.device),
         ])
         val_transforms = Compose([
             AddChanneld(keys=all_val_keys),
             EnsureTyped(keys=all_val_keys),
-            ToDeviced(keys=all_val_keys, device=self.device),
+            #ToDeviced(keys=all_val_keys, device=self.device),
         ])
 
         train_ds = CacheDataset(
@@ -210,8 +228,12 @@ class ConvNetTrainer:
                 to_onehot_y=True,
             )
 
-        post_pred = Compose([EnsureType()])
-        post_label = Compose([EnsureType(), AsDiscrete(to_onehot=2)])
+        post_pred = Compose([EnsureType(), AsDiscrete(argmax=True, to_onehot=2)])
+        post_label = Compose([
+            EnsureType(),
+            AsDiscrete(to_onehot=2),
+            KeepLargestConnectedComponent(1)
+        ])
         dice_metric = DiceMetric(
             include_background=True,
             reduction="mean",
@@ -238,6 +260,10 @@ class ConvNetTrainer:
                 self.model.train()
                 for batch in train_loader:
                     num_epoch_batches += 1
+                    # Transfer to device
+                    for key in batch.keys():
+                        if isinstance(batch[key], torch.Tensor):
+                            batch[key] = batch[key].to(self.device)
 
                     self.optimizer.zero_grad()
                     with torch.cuda.amp.autocast():
@@ -278,9 +304,13 @@ class ConvNetTrainer:
                     self.model.eval()
                     with torch.no_grad():
                         for batch in val_loader:
+                            # Transfer to device
+                            for key in batch.keys():
+                                if isinstance(batch[key], torch.Tensor):
+                                    batch[key] = batch[key].to(self.device)
                             image, label = batch['images'], batch['labels']
                             with torch.cuda.amp.autocast():
-                                pred = torch.sigmoid(self.model(image)) > 0.5
+                                pred = self.model(image)
 
                             pred = [post_pred(i)
                                     for i in decollate_batch(pred)]
