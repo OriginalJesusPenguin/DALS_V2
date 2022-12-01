@@ -40,7 +40,7 @@ export WANDB_API_KEY=$(cat ~/WANDB_api_key)
 wandb online
 
 export EXP_POSTFIX=${LSB_JOBID:-NOID}
-export SWEEP_ID=gui5e7hf
+export SWEEP_ID=h701kg3v
 
 # Create experiment directory. The run directory is created in python
 export EXP_DIR=/work1/patmjen/meshfit/experiments/mesh_decoder/md_sa_${SWEEP_ID}_${EXP_POSTFIX}
@@ -53,5 +53,5 @@ find . -type f -name "*.py" -o -name "*.sh" -o -name "*.yaml" | xargs -i cp --pa
 # Ensure CUDA_VISIBLE_DEVICES is set to something
 export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0}
 
-wandb agent patmjen/mesh-decoder/${SWEEP_ID} --count=6
+wandb agent patmjen/mesh-decoder/${SWEEP_ID} --count=2
 
