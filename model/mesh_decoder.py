@@ -36,7 +36,12 @@ from model.graph_conv import MyGraphConv
 from model.encodings import sph_encoding, pos_encoding
 from model.loss import mesh_bl_quality_loss
 from util import seed_everything
-from util.remesh import remesh_template_from_deformed
+try:
+    from util.remesh import remesh_template_from_deformed
+except ImportError:
+    # Remesh functionality not available
+    def remesh_template_from_deformed(*args, **kwargs):
+        raise NotImplementedError("Remesh functionality not available - missing libremesh.so")
 
 
 class GraphConvBlock(nn.Module):
@@ -195,7 +200,7 @@ class MeshDecoder(nn.Module):
         mode = mode.lower()
         if mode == 'gcnn':
             MeshOffsetBlock = MeshOffsetBlockGCNN
-            if concat_latent_at is not None:
+            if concat_latent_at is not None and len(concat_latent_at) > 0:
                 raise ValueError('concat_latent_at is not supported for GCNN')
         elif mode == 'mlp':
             MeshOffsetBlock = MeshOffsetBlockMLP
@@ -206,17 +211,29 @@ class MeshDecoder(nn.Module):
             self.subdivide = SubdivideMeshes()
         else:
             self.subdivide = nn.Identity()
-        self.offset_blocks = nn.ModuleList([
-            MeshOffsetBlock(
-                latent_features,
-                hidden_features,
-                vert_in_features,
-                vert_out_features,
-                norm,
-                concat_latent_at=concat_latent_at,
-            )
-            for _ in range(steps)
-        ])
+        if mode == 'mlp':
+            self.offset_blocks = nn.ModuleList([
+                MeshOffsetBlock(
+                    latent_features,
+                    hidden_features,
+                    vert_in_features,
+                    vert_out_features,
+                    norm,
+                    concat_latent_at=concat_latent_at,
+                )
+                for _ in range(steps)
+            ])
+        else:  # mode == 'gcnn'
+            self.offset_blocks = nn.ModuleList([
+                MeshOffsetBlock(
+                    latent_features,
+                    hidden_features,
+                    vert_in_features,
+                    vert_out_features,
+                    norm,
+                )
+                for _ in range(steps)
+            ])
 
 
     def forward(self, templates, latent_vectors, template_vert_features=None,
@@ -705,27 +722,13 @@ class MeshDecoderTrainer:
         loss_la = 0
         loss_qa = 0
         for pred in preds:
-            # Force CPU for PyTorch3D operations to avoid GPU compilation issues
-            pred_cpu = pred.cpu()
             pred_points, pred_normals = sample_points_from_meshes(
-                pred_cpu, self.num_mesh_samples, return_normals=True)
-            # Move results back to the target device
-            pred_points = pred_points.to(self.device)
-            pred_normals = pred_normals.to(self.device)
+                pred, self.num_mesh_samples, return_normals=True)
 
-            # Force CPU for chamfer distance calculation
-            pred_points_cpu = pred_points.cpu()
-            target_points_cpu = batch['target_points'].cpu()
-            pred_normals_cpu = pred_normals.cpu()
-            target_normals_cpu = batch['target_normals'].cpu()
-            
             cf_point, cf_normal = chamfer_distance(
-                x=pred_points_cpu, y=target_points_cpu,
-                x_normals=pred_normals_cpu, y_normals=target_normals_cpu,
+                x=pred_points, y=batch['target_points'],
+                x_normals=pred_normals, y_normals=batch['target_normals'],
             )
-            # Move results back to target device
-            cf_point = cf_point.to(self.device)
-            cf_normal = cf_normal.to(self.device)
             loss_cf += cf_point
             loss_nl += cf_normal
             loss_el += mesh_edge_loss(pred)

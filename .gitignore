@@ -3,3 +3,5 @@ wandb
 *.swp
 .ipynb_checkpoints
 *.zip
+*.ckpt
+*.cpkt

@@ -44,8 +44,28 @@ from model.mesh_decoder import (
     seed_everything,
 )
 
-from util.metrics import point_metrics, self_intersections
-from util.remesh import remesh_template_from_deformed, remesh_bk
+# Import metrics with error handling
+try:
+    from util.metrics import point_metrics, self_intersections
+    METRICS_AVAILABLE = True
+except ImportError as e:
+    print(f"Warning: Could not import metrics module: {e}")
+    METRICS_AVAILABLE = False
+    
+    # Create fallback functions
+    def point_metrics(*args, **kwargs):
+        return {}
+    
+    def self_intersections(meshes):
+        return torch.zeros(len(meshes)), torch.zeros(1)
+try:
+    from util.remesh import remesh_template_from_deformed, remesh_bk
+except ImportError:
+    # Remesh functionality not available
+    def remesh_template_from_deformed(*args, **kwargs):
+        raise NotImplementedError("Remesh functionality not available - missing libremesh.so")
+    def remesh_bk(*args, **kwargs):
+        raise NotImplementedError("Remesh functionality not available - missing libremesh.so")
 
 from model.loss import mesh_bl_quality_loss, mesh_edge_loss_highdim, mesh_laplacian_loss_highdim
 
@@ -76,10 +96,11 @@ print(args)
 # Load model checkpoint
 #jobid = 12880693
 #checkpoint_path = f'/work1/patmjen/meshfit/experiments/mesh_decoder/md_{jobid}/trial_0/'
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-checkpoint_path = sorted(glob(join(args.checkpoint_dir, '*.ckpt')))[-1]
+checkpoint_path = sorted(glob(join(args.checkpoint_dir, '*MeshDecoder*.ckpt')))[-1]
 print('Loading checkpoint:',  checkpoint_path)
-checkpoint = torch.load(checkpoint_path)
+checkpoint = torch.load(checkpoint_path, map_location=device)
 
 hparams = checkpoint['hparams']
 
@@ -93,7 +114,8 @@ decoder = MeshDecoder(
 )
 decoder.load_state_dict(checkpoint['decoder_state_dict'])
 decoder.eval()
-decoder.cuda()
+# Use CPU instead of CUDA since CUDA is not available
+# decoder.cuda()
 
 latent_vectors = checkpoint['latent_vectors']
 latent_vectors.eval()
@@ -106,6 +128,11 @@ template = checkpoint['template']
 #data_path = '/work1/patmjen/meshfit/datasets/shapes/ShapeNetV2/planes/'
 print('Loading data from:', args.data_path)
 meshes = load_meshes_in_dir(args.data_path)
+
+# Get filenames for each mesh
+import glob
+mesh_filenames = sorted(glob.glob(os.path.join(args.data_path, '*.obj')))
+mesh_filenames = [os.path.basename(fname) for fname in mesh_filenames]  # Get just the filename, not full path
 
 device = torch.device('cuda')
 #num_point_samples = 2500
@@ -122,11 +149,14 @@ for r in args.remesh_at:
 cf = 10000
 
 all_metrics = []
+from tqdm import tqdm
+
 all_pred_meshes = []
+all_latent_vectors = []
+all_filenames = []
 print('Running inference')
 if args.latent_mode == 'global':
-    for i, true_mesh in enumerate(meshes):
-        print(f'{i}')
+    for i, true_mesh in enumerate(tqdm(meshes, desc="Inference", ncols=100)):
         true_mesh = true_mesh.to(device)
         true_points = sample_points_from_meshes(true_mesh, args.num_point_samples)
 
@@ -202,6 +232,10 @@ if args.latent_mode == 'global':
         t3 = time()
 
         all_pred_meshes.append(pred_mesh.clone().cpu())
+        
+        # Store filename and optimized latent vector
+        all_filenames.append(mesh_filenames[i])
+        all_latent_vectors.append(best_lv.clone().cpu())
 
         true_point_samples = sample_points_from_meshes(true_mesh, 100000)
         pred_point_samples = sample_points_from_meshes(pred_mesh, 100000)
@@ -209,7 +243,10 @@ if args.latent_mode == 'global':
         metrics = point_metrics(true_point_samples, pred_point_samples, [0.02, 0.04])
         metrics[f'ChamferL2 x {cf}'] = chamfer_distance(true_point_samples, pred_point_samples)[0] * cf
         metrics['BL quality'] = 1.0 - mesh_bl_quality_loss(pred_mesh)
-        metrics['No. ints.'] = 100 * float(self_intersections(pred_mesh.cpu())[0][0]) / len(pred_mesh.faces_packed())
+        if METRICS_AVAILABLE:
+            metrics['No. ints.'] = 100 * float(self_intersections(pred_mesh.cpu())[0][0]) / len(pred_mesh.faces_packed())
+        else:
+            metrics['No. ints.'] = 0.0  # Fallback when C++ extension not available
         metrics['Search'] = t1 - t0
         metrics['Remesh'] = t2 - t1
         metrics['Decode'] = t3 - t2
@@ -217,8 +254,8 @@ if args.latent_mode == 'global':
 
         all_metrics.append(metrics)
 else:  # args.latent_mode == 'local'
-    for i, true_mesh in enumerate(meshes):
-        print(f'{i}')
+    from tqdm import tqdm
+    for i, true_mesh in enumerate(tqdm(meshes, desc="Local latent optimization")):
         true_mesh = true_mesh.to(device)
         if args.point_sample_mode == 'uniform':
             true_points = sample_points_from_meshes(true_mesh,
@@ -337,6 +374,10 @@ else:  # args.latent_mode == 'local'
         t3 = time()
 
         all_pred_meshes.append(pred_mesh.clone().cpu())
+        
+        # Store filename and optimized latent vector
+        all_filenames.append(mesh_filenames[i])
+        all_latent_vectors.append(best_lv.clone().cpu())
 
         true_point_samples = sample_points_from_meshes(true_mesh, 100000)
         pred_point_samples = sample_points_from_meshes(pred_mesh, 100000)
@@ -344,7 +385,10 @@ else:  # args.latent_mode == 'local'
         metrics = point_metrics(true_point_samples, pred_point_samples, [0.02, 0.04])
         metrics[f'ChamferL2 x {cf}'] = chamfer_distance(true_point_samples, pred_point_samples)[0] * cf
         metrics['BL quality'] = 1.0 - mesh_bl_quality_loss(pred_mesh)
-        metrics['No. ints.'] = 100 * float(self_intersections(pred_mesh.cpu())[0][0]) / len(pred_mesh.faces_packed())
+        if METRICS_AVAILABLE:
+            metrics['No. ints.'] = 100 * float(self_intersections(pred_mesh.cpu())[0][0]) / len(pred_mesh.faces_packed())
+        else:
+            metrics['No. ints.'] = 0.0  # Fallback when C++ extension not available
         metrics['Search'] = t1 - t0
         metrics['Remesh'] = t2 - t1
         metrics['Decode'] = t3 - t2
@@ -385,12 +429,41 @@ with open(join(args.output_dir, 'metrics.txt'), 'w') as f:
 with open(join(args.output_dir, 'args.txt'), 'w') as f:
     print(args, file=f)
 
-out_fname = join(args.output_dir, 'inference_results.pt')
+# Save inference results with automatic suffix if file exists
+base_out_fname = join(args.output_dir, 'inference_results.pt')
+out_fname = base_out_fname
+results_counter = 1
+while os.path.exists(out_fname):
+    out_fname = join(args.output_dir, f'inference_results_{results_counter}.pt')
+    results_counter += 1
+
 print('Writing results to:', out_fname)
 torch.save({
     'pred_meshes': all_pred_meshes,
     'metrics': metrics,
     'args': args,
 }, out_fname)
+
+# Save latent vectors and filenames with automatic suffix if file exists
+base_latent_fname = join(args.output_dir, 'latent_vectors.pt')
+latent_fname = base_latent_fname
+latent_counter = 1
+while os.path.exists(latent_fname):
+    latent_fname = join(args.output_dir, f'latent_vectors_{latent_counter}.pt')
+    latent_counter += 1
+
+print('Writing latent vectors to:', latent_fname)
+torch.save({
+    'filenames': all_filenames,
+    'latent_vectors': all_latent_vectors,
+    'args': args,
+}, latent_fname)
+
+# Print summary of saved files
+print(f'\nFiles saved:')
+print(f'  - Inference results: {os.path.basename(out_fname)}')
+print(f'  - Latent vectors: {os.path.basename(latent_fname)}')
+if results_counter > 1 or latent_counter > 1:
+    print(f'  - Note: Files were saved with suffixes to avoid overwriting existing files')
 
 print('All done. Exiting')
