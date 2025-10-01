@@ -1,3 +1,4 @@
+from tqdm import tqdm
 import sys
 import os
 import datetime
@@ -266,14 +267,14 @@ class MeshDecoderTrainer:
 
         # Training parameters
         parser.add_argument('--num_epochs', type=int, default=9999)
-        parser.add_argument('--batch_size', type=int, default=256)
+        parser.add_argument('--batch_size', type=int, default=16)
         parser.add_argument('--weight_normal_loss', type=float, default=0)
         parser.add_argument('--weight_norm_loss', type=float, default=1e-3)
         parser.add_argument('--weight_edge_loss', type=float, default=1e-2)
         parser.add_argument('--weight_laplacian_loss', type=float, default=1e-2)
         parser.add_argument('--weight_quality_loss', type=float, default=0)
         parser.add_argument('--num_mesh_samples', type=int, default=10000)
-        parser.add_argument('--train_batch_size', type=int, default=256)
+        parser.add_argument('--train_batch_size', type=int, default=16)
         parser.add_argument('--learning_rate_net', type=float, default=1e-3)
         parser.add_argument('--learning_rate_lv', type=float, default=1e-3)
         parser.add_argument('--lr_reduce_factor', type=float, default=0.1)
@@ -389,12 +390,32 @@ class MeshDecoderTrainer:
         self.train_normal_samples = []
         for ib in range(0, num_train_samples, sampling_batch_size):
             ie = min(num_train_samples, ib + sampling_batch_size)
+            
+            # Debug: Check meshes before sampling
+            batch_meshes = [m.to(self.device) for m in train_meshes[ib:ie]]
+            print(f"DEBUG: Checking batch {ib}-{ie} before sampling...")
+            for j, mesh in enumerate(batch_meshes):
+                verts = mesh.verts_packed()
+                faces = mesh.faces_packed()
+                has_nan_verts = torch.isnan(verts).any()
+                has_inf_verts = torch.isinf(verts).any()
+                has_nan_faces = torch.isnan(faces.float()).any()
+                has_inf_faces = torch.isinf(faces.float()).any()
+                # print(f"  Batch mesh {j}: verts NaN={has_nan_verts}, verts Inf={has_inf_verts}, faces NaN={has_nan_faces}, faces Inf={has_inf_faces}")
+                # if has_nan_verts or has_inf_verts or has_nan_faces or has_inf_faces:
+                #     print(f"  Batch mesh {j} has problematic values!")
+                #     print(f"    Verts shape: {verts.shape}, min: {verts.min()}, max: {verts.max()}")
+                #     print(f"    Faces shape: {faces.shape}, min: {faces.min()}, max: {faces.max()}")
+            
+            # Force CPU for PyTorch3D operations to avoid GPU compilation issues
+            batch_meshes_cpu = [m.cpu() for m in batch_meshes]
             samples = sample_points_from_meshes(
-                join_meshes_as_batch([m.to(self.device)
-                                      for m in train_meshes[ib:ie]]),
+                join_meshes_as_batch(batch_meshes_cpu),
                 num_samples=self.num_mesh_samples,
                 return_normals=True,
             )
+            # Move samples back to the target device
+            samples = [s.to(self.device) for s in samples]
             self.train_point_samples.append(samples[0].cpu())
             self.train_normal_samples.append(samples[1].cpu())
 
@@ -458,13 +479,27 @@ class MeshDecoderTrainer:
             self.train_start_time = datetime.datetime.now()
             start_epoch = self.load_checkpoint(self.resume_from)
         try:
-            for epoch in range(start_epoch, self.num_epochs):
-                print(f'Epoch {epoch + 1}')
+            from tqdm import tqdm
+            epoch_progress = tqdm(range(start_epoch, self.num_epochs), 
+                                desc='Training Progress',
+                                ncols=120,
+                                initial=start_epoch,
+                                total=self.num_epochs)
+            
+            for epoch in epoch_progress:
+                epoch_progress.set_description(f'Epoch {epoch + 1}/{self.num_epochs}')
                 epoch_profile_times = defaultdict(list)
                 epoch_losses = defaultdict(float)
                 num_epoch_batches = 0
                 t_epoch = time()
-                for batch_idxs in train_index_loader:
+                
+                # Create progress bar for this epoch
+                batch_progress = tqdm(train_index_loader, 
+                                    desc=f'Batches',
+                                    leave=False,
+                                    ncols=100)
+                
+                for batch_idxs in batch_progress:
                     num_epoch_batches += 1
 
                     # Prepare batch
@@ -513,6 +548,12 @@ class MeshDecoderTrainer:
                         epoch_losses[name] += loss_val.mean()
                     t_accum = time() - t_accum
                     epoch_profile_times['accum'].append(t_accum)
+                    
+                    # Update progress bar with current loss
+                    batch_progress.set_postfix({
+                        'loss': f'{loss.item():.6f}',
+                        'chamfer': f'{losses["chamfer"].mean().item():.6f}'
+                    })
 
                 # Remesh template if time
                 if (epoch + 1) % self.remesh_every == 0:
@@ -532,6 +573,9 @@ class MeshDecoderTrainer:
                     self.profile_times['remesh'].append(t_remesh)
 
 
+                # Close batch progress bar
+                batch_progress.close()
+                
                 # Compute mean epoch losses
                 for name in epoch_losses.keys():
                     epoch_losses[name] /= num_epoch_batches
@@ -581,13 +625,22 @@ class MeshDecoderTrainer:
                     log_dict['prof/epoch'] = t_epoch
                     wandb.log(log_dict)
 
+                # Update epoch progress bar with final loss
+                epoch_progress.set_postfix({
+                    'loss': f'{epoch_losses["loss"]:.6f}',
+                    'chamfer': f'{epoch_losses["chamfer"]:.6f}',
+                    'time': f'{t_epoch:.2f}s'
+                })
+                
                 print(f"Loss: {epoch_losses['loss']:.6g}, "
                       f"{t_epoch:.4f} seconds")
             else:
                 print('All epochs done')
+                epoch_progress.close()
         except KeyboardInterrupt:
             print('Keyboard interrupt')
             self.num_epochs = epoch + 1
+            epoch_progress.close()
 
         # Print closing summary
         print('Training finished')
@@ -652,13 +705,27 @@ class MeshDecoderTrainer:
         loss_la = 0
         loss_qa = 0
         for pred in preds:
+            # Force CPU for PyTorch3D operations to avoid GPU compilation issues
+            pred_cpu = pred.cpu()
             pred_points, pred_normals = sample_points_from_meshes(
-                pred, self.num_mesh_samples, return_normals=True)
+                pred_cpu, self.num_mesh_samples, return_normals=True)
+            # Move results back to the target device
+            pred_points = pred_points.to(self.device)
+            pred_normals = pred_normals.to(self.device)
 
+            # Force CPU for chamfer distance calculation
+            pred_points_cpu = pred_points.cpu()
+            target_points_cpu = batch['target_points'].cpu()
+            pred_normals_cpu = pred_normals.cpu()
+            target_normals_cpu = batch['target_normals'].cpu()
+            
             cf_point, cf_normal = chamfer_distance(
-                x=pred_points, y=batch['target_points'],
-                x_normals=pred_normals, y_normals=batch['target_normals'],
+                x=pred_points_cpu, y=target_points_cpu,
+                x_normals=pred_normals_cpu, y_normals=target_normals_cpu,
             )
+            # Move results back to target device
+            cf_point = cf_point.to(self.device)
+            cf_normal = cf_normal.to(self.device)
             loss_cf += cf_point
             loss_nl += cf_normal
             loss_el += mesh_edge_loss(pred)

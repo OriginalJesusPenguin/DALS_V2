@@ -1,5 +1,6 @@
 import os
 import argparse
+import trimesh
 import math
 import datetime
 from collections import defaultdict
@@ -138,11 +139,13 @@ class SirenDecoderTrainer:
         for ib in range(0, num_train_samples, sampling_batch_size):
             ie = min(num_train_samples, ib + sampling_batch_size)
             samples = sample_points_from_meshes(
-                join_meshes_as_batch([m.to(self.device)
+                join_meshes_as_batch([m
                                       for m in train_meshes[ib:ie]]),
                 num_samples=self.num_point_samples // 2,
                 return_normals=True,
             )
+
+            # samples = trimesh.sample_
             self.train_mesh_point_samples.append(samples[0].cpu())
             self.train_mesh_normal_samples.append(samples[1].cpu())
 

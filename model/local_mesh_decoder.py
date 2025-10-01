@@ -371,8 +371,7 @@ class LocalMeshDecoderTrainer:
         for ib in range(0, num_train_samples, sampling_batch_size):
             ie = min(num_train_samples, ib + sampling_batch_size)
             samples = sample_points_from_meshes(
-                join_meshes_as_batch([m.to(self.device)
-                                      for m in train_meshes[ib:ie]]),
+                join_meshes_as_batch([m for m in train_meshes[ib:ie]]),
                 num_samples=self.num_mesh_samples,
                 return_normals=True,
             )

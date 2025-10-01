@@ -54,10 +54,8 @@ def augment_points(
         # Nothing to do, just return
         return []
 
-    if device is not None:
-        device = torch.device(device)
-    else:
-        device = meshes[0].device
+    # Force CPU for augmentation to avoid GPU compatibility issues
+    device = torch.device('cpu')
     pw = PointWOLF(
         num_anchor=num_anchor,
         sample_type=sample_type,
@@ -98,10 +96,8 @@ def augment_meshes(
         # Nothing to do, just return
         return []
 
-    if device is not None:
-        device = torch.device(device)
-    else:
-        device = meshes[0].device
+    # Force CPU for augmentation to avoid GPU compatibility issues
+    device = torch.device('cpu')
     pw = PointWOLF(
         num_anchor=num_anchor,
         sample_type=sample_type,
@@ -204,6 +200,11 @@ class PointWOLF(object):
         pos_new = self.kernel_regression(pos, pos_anchor, pos_transformed)
         pos_new = self.normalize(pos_new)
         
+        # Final safety check - if augmentation failed, return original
+        if torch.isnan(pos_new).any() or torch.isinf(pos_new).any():
+            print("Warning: Augmentation produced NaN/Inf, using original points")
+            return pos.float(), pos.float()
+        
         return pos.float(), pos_new.float()
         
 
@@ -235,7 +236,17 @@ class PointWOLF(object):
         # Kernel regression
         weight = torch.exp(-0.5 * (sub ** 2) / (self.sigma ** 2))  # (M, N) 
         pos_new = torch.sum(weight.unsqueeze(2).expand(-1, -1, 3) * pos_transformed, dim=0)  # (N, 3)
-        pos_new = pos_new / weight.sum(dim=0, keepdim=True).T  # Normalize by weight
+        
+        # Avoid division by zero
+        weight_sum = weight.sum(dim=0, keepdim=True).T
+        weight_sum = torch.clamp(weight_sum, min=1e-8)  # Prevent division by zero
+        pos_new = pos_new / weight_sum
+        
+        # Check for NaN/Inf and replace with original if needed
+        if torch.isnan(pos_new).any() or torch.isinf(pos_new).any():
+            print("Warning: NaN/Inf detected in kernel regression, using original points")
+            return pos
+            
         return pos_new
 
     
@@ -326,7 +337,23 @@ class PointWOLF(object):
             pos([N,3]) : normalized Pointcloud
         """
         pos = pos - pos.mean(dim=-2, keepdim=True)
-        scale = (1 / torch.sqrt((pos ** 2).sum(1)).max()) * 0.999999
+        
+        # Calculate scale with safety checks
+        pos_norm = torch.sqrt((pos ** 2).sum(1))
+        max_norm = pos_norm.max()
+        
+        # Avoid division by zero
+        if max_norm < 1e-8:
+            print("Warning: Very small norm detected, skipping normalization")
+            return pos
+            
+        scale = (1 / max_norm) * 0.999999
         pos = scale * pos
+        
+        # Final safety check
+        if torch.isnan(pos).any() or torch.isinf(pos).any():
+            print("Warning: NaN/Inf detected after normalization, returning original")
+            return pos - pos.mean(dim=-2, keepdim=True)
+            
         return pos
 
