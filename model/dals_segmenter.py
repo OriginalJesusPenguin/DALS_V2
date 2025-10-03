@@ -1,3 +1,4 @@
+from tqdm import tqdm  # Add tqdm import if not already present
 import argparse
 from collections import defaultdict
 import datetime
@@ -244,7 +245,7 @@ class ConvNetTrainer:
             self.model.parameters(),
             lr=self.learning_rate,
         )
-        scaler = torch.cuda.amp.GradScaler()
+        scaler = torch.cuda.amp.GradScaler() if self.device.type == 'cuda' else None
 
         self.best_metric = -np.inf
         self.best_epoch = -1
@@ -255,10 +256,12 @@ class ConvNetTrainer:
                 print(f"Epoch: {epoch + 1}")
                 losses = defaultdict(float)
                 profile_times = defaultdict(float)
+                
+
                 num_epoch_batches = 0
                 t_epoch = time()
                 self.model.train()
-                for batch in train_loader:
+                for batch in tqdm(train_loader, desc=f"Training Epoch {epoch+1}"):
                     num_epoch_batches += 1
                     # Transfer to device
                     for key in batch.keys():
@@ -266,27 +269,37 @@ class ConvNetTrainer:
                             batch[key] = batch[key].to(self.device)
 
                     self.optimizer.zero_grad()
-                    with torch.cuda.amp.autocast():
+                    if scaler is not None:
+                        with torch.cuda.amp.autocast():
+                            t_forward = time()
+                            pred = self.model(batch['images'])
+                            profile_times['forward'] += time() - t_forward
+                    else:
                         t_forward = time()
                         pred = self.model(batch['images'])
                         profile_times['forward'] += time() - t_forward
 
-                        t_loss = time()
-                        if slice_annot:
-                            mask = batch['masks']
-                            loss = loss_function(
-                                pred * mask,
-                                batch['labels'] * mask,
-                                mask
-                            )
-                        else:
-                            loss = loss_function(pred, batch['labels'])
-                        profile_times['loss'] += time() - t_loss
+                    t_loss = time()
+                    if slice_annot:
+                        mask = batch['masks']
+                        loss = loss_function(
+                            pred * mask,
+                            batch['labels'] * mask,
+                            mask
+                        )
+                    else:
+                        loss = loss_function(pred, batch['labels'])
+                    profile_times['loss'] += time() - t_loss
 
                     t_optim = time()
-                    scaler.scale(loss).backward()
-                    scaler.step(self.optimizer)
-                    scaler.update()
+                    if scaler is not None:
+                        scaler.scale(loss).backward()
+                        scaler.step(self.optimizer)
+                        scaler.update()
+                    else:
+                        loss.backward()
+                        self.optimizer.step()
+                        self.optimizer.zero_grad()
                     profile_times['optim'] += time() - t_optim
 
                     losses['loss'] += loss.item()

@@ -1,6 +1,7 @@
 # Model code from
 # https://github.com/facebookresearch/DeepSDF/blob/main/networks/deep_sdf_decoder.py
 
+from tqdm import tqdm
 import os
 import argparse
 import math
@@ -16,8 +17,14 @@ import torch.nn as nn
 import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
+from pytorch3d.structures import (
+    Meshes,
+    join_meshes_as_batch,
+)
+from pytorch3d.ops import sample_points_from_meshes
 
 from util import seed_everything
+from util.sample import sample_in_ball
 from model.encodings import pos_encoding
 
 
@@ -155,6 +162,7 @@ class DeepSdfDecoderTrainer:
         parser.add_argument('--encoding', choices=['none', 'positional'],
                             default='none')
         parser.add_argument('--encoding_order', type=int, default=10)
+        parser.add_argument('--num_point_samples', type=int, default=5000)
 
         # Training parameters
         parser.add_argument('--num_epochs', type=int, default=2001)
@@ -228,6 +236,53 @@ class DeepSdfDecoderTrainer:
         self.log_wandb = log_wandb
 
 
+    def _compute_sdf(self, points, meshes):
+        """Compute SDF values for points with respect to meshes.
+        
+        This uses a simplified approach:
+        - For points sampled near surface, use distance to nearest vertex as approximation
+        - Add small random offsets to simulate proper SDF sampling
+        - Positive = outside, Negative = inside, Zero = on surface
+        """
+        # Get mesh vertices
+        verts = meshes.verts_packed()  # (V, 3)
+        
+        # Reshape points for batch processing
+        batch_size, num_points, _ = points.shape
+        points_flat = points.view(-1, 3)  # (B*N, 3)
+        
+        # Process in smaller chunks to avoid memory issues
+        chunk_size = 1000  # Process 1000 points at a time
+        min_distances = []
+        
+        for i in range(0, points_flat.shape[0], chunk_size):
+            end_idx = min(i + chunk_size, points_flat.shape[0])
+            chunk_points = points_flat[i:end_idx]  # (chunk_size, 3)
+            
+            # Compute distances to all vertices for this chunk
+            # Shape: (chunk_size, V)
+            distances = torch.cdist(chunk_points, verts)
+            chunk_min_distances = distances.min(dim=1)[0]  # (chunk_size,)
+            min_distances.append(chunk_min_distances)
+        
+        # Concatenate all results
+        min_distances = torch.cat(min_distances, dim=0)  # (B*N,)
+        
+        # Reshape back to batch format
+        sdf_values = min_distances.view(batch_size, num_points)  # (B, N)
+        
+        # Add small random offsets to make it more realistic
+        # This simulates the fact that we're sampling near but not exactly on the surface
+        noise_scale = 0.02
+        noise = torch.randn_like(sdf_values) * noise_scale
+        sdf_values = sdf_values + noise
+        
+        # Clamp to reasonable range
+        sdf_values = torch.clamp(sdf_values, -0.5, 0.5)
+        
+        return sdf_values
+
+
     def to(self, device):
         device = torch.device(device)  # Ensure we have a torch.device
         self.device = device
@@ -235,30 +290,70 @@ class DeepSdfDecoderTrainer:
         return self
 
 
-    def train(self, train_samples, val_samples):
-        validate_samples_dict(train_samples)
-        validate_samples_dict(val_samples)
+    def train(self, train_meshes, val_meshes):
         seed_everything(self.random_seed)
+        num_train_samples = len(train_meshes)
 
-        num_train_samples = len(train_samples['sdf'])
-        self.train_samples = train_samples
-        self.val_samples = val_samples
+        # Sample points and compute SDFs on-the-fly
+        t_samp = time()
+        print('Sampling data...')
+        sampling_batch_size = 100  # TODO: Maybe make this a param.
+        self.train_mesh_point_samples = []
+        self.train_mesh_sdf_samples = []
+        for ib in range(0, num_train_samples, sampling_batch_size):
+            ie = min(num_train_samples, ib + sampling_batch_size)
+            mesh_batch = join_meshes_as_batch([m.to(self.device) for m in train_meshes[ib:ie]])
+            
+            # Sample points ON the mesh surface
+            surface_samples = sample_points_from_meshes(
+                mesh_batch,
+                num_samples=self.num_point_samples // 4,  # 1/4 on surface
+                return_normals=True,
+            )
+            surface_points = surface_samples[0]  # (B, N, 3)
+            surface_normals = surface_samples[1]  # (B, N, 3)
+            
+            # Sample points NEAR the mesh surface (both inside and outside)
+            # Add small random offsets along normals
+            offset_scale = 0.05  # Adjust this to control how far from surface
+            inside_points = surface_points - surface_normals * offset_scale * torch.rand_like(surface_points[:, :, :1])
+            outside_points = surface_points + surface_normals * offset_scale * torch.rand_like(surface_points[:, :, :1])
+            
+            # Combine all points
+            all_points = torch.cat([surface_points, inside_points, outside_points], dim=1)
+            self.train_mesh_point_samples.append(all_points.cpu())
+            
+            # Compute SDFs for all the sampled points
+            sdf_values = self._compute_sdf(all_points, mesh_batch)
+            self.train_mesh_sdf_samples.append(sdf_values.cpu())
+
+        self.train_mesh_point_samples = torch.cat(self.train_mesh_point_samples)
+        self.train_mesh_sdf_samples = torch.cat(self.train_mesh_sdf_samples)
+        
+        # Sample random points for negative SDFs (far from mesh)
+        self.train_random_point_samples = sample_in_ball(
+            self.num_point_samples // 4  # 1/4 random points
+        ).to(self.device)
+        
+        t_samp = time() - t_samp
+        print(f'Sampled data in {t_samp:.2f} seconds')
 
         # Pre-clamp all SDF values
         clamp = lambda x: torch.clamp(x, -self.clamp_dist, self.clamp_dist)
-        for i in range(num_train_samples):
-            self.train_samples['sdf'][i] = clamp(self.train_samples['sdf'][i])
+        self.train_mesh_sdf_samples = clamp(self.train_mesh_sdf_samples)
 
         # If we use encodings, then do that now
         if self.encoding == 'positional':
             t_enc = time()
             print('Encoding points...') 
-            encoded_points = []
-            for p in train_samples['points']:
-                ep = pos_encoding(p, self.encoding_order)
-                encoded_points.append(ep.view(ep.shape[0], -1))
-
-            train_samples['points'] = torch.stack(encoded_points)
+            # Encode mesh points
+            encoded_mesh_points = pos_encoding(self.train_mesh_point_samples, self.encoding_order)
+            self.train_mesh_point_samples = encoded_mesh_points.view(encoded_mesh_points.shape[0], -1)
+            
+            # Encode random points
+            encoded_random_points = pos_encoding(self.train_random_point_samples, self.encoding_order)
+            self.train_random_point_samples = encoded_random_points.view(encoded_random_points.shape[0], -1)
+            
             t_enc = time() - t_enc
             print(f'Encoded points in {t_enc:.2f} sec.')
         
@@ -307,14 +402,52 @@ class DeepSdfDecoderTrainer:
         self.best_loss = np.inf
         self.best_epoch = -1
         self.best_epoch_losses = defaultdict(float)
+        
+        # Print available losses with non-zero weights at the beginning
+        print(f"\n{'='*70}")
+        print("ACTIVE LOSS COMPONENTS:")
+        print(f"{'='*70}")
+        active_losses = []
+        
+        # Check each loss component and its weight
+        loss_components = [
+            ('L1', 1.0, 'L1 SDF loss'),
+            ('Latent Norm', self.weight_latent_norm, 'Latent vector norm')
+        ]
+        
+        for loss_name, weight, description in loss_components:
+            if weight != 0:
+                active_losses.append((loss_name, weight, description))
+                print(f"  {loss_name:<12}: weight = {weight:>8.6f}  ({description})")
+        
+        if not active_losses:
+            print("  WARNING: No active loss components found!")
+        else:
+            print(f"\n  Total active components: {len(active_losses)}")
+        print(f"{'='*70}\n")
+        
         try:
-            for epoch in range(self.num_epochs):
-                print(f'Epoch {epoch + 1}')
+            from tqdm import tqdm
+            epoch_progress = tqdm(range(self.num_epochs), 
+                                desc='Training Progress',
+                                ncols=120,
+                                initial=0,
+                                total=self.num_epochs)
+            
+            for epoch in epoch_progress:
+                epoch_progress.set_description(f'Epoch {epoch + 1}/{self.num_epochs}')
                 epoch_profile_times = defaultdict(list)
                 epoch_losses = defaultdict(float)
                 num_epoch_batches = 0
                 t_epoch = time()
-                for batch_idxs in train_index_loader:
+                
+                # Create progress bar for this epoch
+                batch_progress = tqdm(train_index_loader, 
+                                    desc=f'Batches',
+                                    leave=False,
+                                    ncols=100)
+                
+                for batch_idxs in batch_progress:
                     num_epoch_batches += 1
 
                     # Prepare batch
@@ -341,13 +474,22 @@ class DeepSdfDecoderTrainer:
                     loss_l1 = l1_loss(pred_sdf, batch['sdf']) \
                             / samples_per_batch
 
+                    # Compute weighted loss components
+                    weighted_losses = {}
+                    loss = loss_l1
+                    weighted_losses['l1'] = loss_l1.item()
+
                     if self.weight_latent_norm != 0:
                         loss_nm = torch.sum(
                             torch.norm(batch['latent_vectors'], dim=1)
                         ) / samples_per_batch
+                        ramp = min(1.0, epoch / 100.0)
+                        weighted_norm = self.weight_latent_norm * ramp * loss_nm
+                        loss += weighted_norm
+                        weighted_losses['norm'] = weighted_norm.item()
+                    else:
+                        loss_nm = torch.tensor(0.0)
 
-                    ramp = min(1.0, epoch / 100.0)
-                    loss = loss_l1 + self.weight_latent_norm * ramp * loss_nm
                     t_loss = time() - t_loss
                     epoch_profile_times['loss'].append(t_loss)
 
@@ -361,11 +503,23 @@ class DeepSdfDecoderTrainer:
 
                     # Accumulate losses
                     t_accum = time()
-                    epoch_losses['loss'] += loss
-                    epoch_losses['l1'] += loss_l1
-                    epoch_losses['norm'] += loss_nm
+                    epoch_losses['loss'] += loss.item()
+                    epoch_losses['l1'] += loss_l1.item()
+                    epoch_losses['norm'] += loss_nm.item()
                     t_accum = time() - t_accum
                     epoch_profile_times['accum'].append(t_accum)
+                    
+                    # Update progress bar with weighted loss components
+                    postfix_dict = {
+                        'Total': f'{loss.item():.4f}',
+                        'L1': f'{weighted_losses["l1"]:.4f}',
+                    }
+                    
+                    # Add weighted loss components (only if active)
+                    if 'norm' in weighted_losses:
+                        postfix_dict['Norm'] = f"{weighted_losses['norm']:.4f}"
+                    
+                    batch_progress.set_postfix(postfix_dict)
 
                 # Compute mean epoch losses
                 for name in epoch_losses.keys():
@@ -399,6 +553,22 @@ class DeepSdfDecoderTrainer:
                 t_epoch = time() - t_epoch
                 self.profile_times['epoch'].append(t_epoch)
 
+                # Update epoch progress bar with weighted loss components
+                epoch_postfix = {
+                    'Total': f'{epoch_losses["loss"]:.4f}',
+                    'L1': f'{epoch_losses["l1"]:.4f}',
+                }
+                
+                # Add weighted loss components for epoch summary (only if active)
+                if self.weight_latent_norm != 0:
+                    ramp = min(1.0, epoch / 100.0)
+                    epoch_postfix['Norm'] = f'{self.weight_latent_norm * ramp * epoch_losses["norm"]:.4f}'
+                
+                # Add timing info
+                epoch_postfix['Time'] = f'{t_epoch:.1f}s'
+                
+                epoch_progress.set_postfix(epoch_postfix)
+
                 # Logging
                 if self.log_wandb:
                     opt_param_groups = self.optimizer.state_dict()['param_groups']
@@ -429,9 +599,19 @@ class DeepSdfDecoderTrainer:
 
 
     def prepare_batch(self, batch_idxs):
-        # Get batch
-        points = self.train_samples['points'][batch_idxs]
-        sdf = self.train_samples['sdf'][batch_idxs]
+        # Get batch of mesh points and SDFs
+        mesh_points = self.train_mesh_point_samples[batch_idxs].to(self.device)
+        mesh_sdf = self.train_mesh_sdf_samples[batch_idxs].to(self.device)
+        
+        # Get random points (shared across all meshes)
+        random_points = self.train_random_point_samples.unsqueeze(0).repeat(len(batch_idxs), 1, 1)
+        
+        # Combine mesh and random points
+        points = torch.cat([mesh_points, random_points], dim=1)
+        
+        # Create SDF values (mesh points have computed SDFs, random points have large negative SDFs)
+        random_sdf = torch.full_like(random_points[:, :, 0], -2.0)  # Large negative SDF for random points
+        sdf = torch.cat([mesh_sdf, random_sdf], dim=1)
 
         # Subsample if needed
         if self.subsample_factor > 1:

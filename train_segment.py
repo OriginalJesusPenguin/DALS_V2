@@ -26,19 +26,27 @@ def simulate_slice_annot(labels, slicing='random'):
     masks = torch.zeros_like(labels)
     for i, label in enumerate(labels):
         xyz = torch.nonzero(label).float()
-        if slicing == 'center':
-            com = xyz.mean(dim=0).round().long()
-            x_slices = com[0]
-            y_slices = com[1]
-            z_slices = com[2]
-        elif slicing == 'random':
-            bbox_min = xyz.min(dim=0).values
-            bbox_max = xyz.max(dim=0).values
-            bbox_len = bbox_max - bbox_min
-            all_slices = bbox_min + torch.rand(1) * bbox_len
-            x_slices = all_slices[0].round().long()
-            y_slices = all_slices[1].round().long()
-            z_slices = all_slices[2].round().long()
+        
+        # Skip if no non-zero elements (empty label)
+        if xyz.shape[0] == 0:
+            # If no labels, just pick center slices
+            x_slices = label.shape[0] // 2
+            y_slices = label.shape[1] // 2
+            z_slices = label.shape[2] // 2
+        else:
+            if slicing == 'center':
+                com = xyz.mean(dim=0).round().long()
+                x_slices = com[0]
+                y_slices = com[1]
+                z_slices = com[2]
+            elif slicing == 'random':
+                bbox_min = xyz.min(dim=0).values
+                bbox_max = xyz.max(dim=0).values
+                bbox_len = bbox_max - bbox_min
+                all_slices = bbox_min + torch.rand(1) * bbox_len
+                x_slices = all_slices[0].round().long()
+                y_slices = all_slices[1].round().long()
+                z_slices = all_slices[2].round().long()
 
         masks[i, x_slices, :, :] = 1
         masks[i, :, y_slices, :] = 1
@@ -52,7 +60,7 @@ def train_conv_net(args):
     if not args.no_wandb:
         wandb.init(
             project='dals-conv-net',
-            entity='patmjen',
+            # entity='patmjen',
             config=args,
             dir=args.checkpoint_dir,
         )

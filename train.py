@@ -21,7 +21,7 @@ def train_mesh_decoder(args):
     if not args.no_wandb:
         wandb.init(
             project='mesh-decoder',
-            name='DALS',
+            name='mesh-decoder',
             config=args,
             dir=args.checkpoint_dir,
         )
@@ -34,29 +34,6 @@ def train_mesh_decoder(args):
     val_data = data[-args.num_val_samples:]
     t_load = time() - t_load
     print(f'Loaded data in {t_load:.2f} seconds')
-
-    # Debug: Check for NaN values before augmentation
-    print("DEBUG: Checking for NaN values before augmentation...")
-    num_nan_verts = 0
-    num_inf_verts = 0
-    num_nan_faces = 0
-    num_inf_faces = 0
-    for i, mesh in enumerate(train_data):
-        verts = mesh.verts_packed()
-        faces = mesh.faces_packed()
-        has_nan_verts = torch.isnan(verts).any()
-        has_inf_verts = torch.isinf(verts).any()
-        has_nan_faces = torch.isnan(faces.float()).any()
-        has_inf_faces = torch.isinf(faces.float()).any()
-        if has_nan_verts:
-            num_nan_verts += 1
-        if has_inf_verts:
-            num_inf_verts += 1
-        if has_nan_faces:
-            num_nan_faces += 1
-        if has_inf_faces:
-            num_inf_faces += 1
-    print(f"DEBUG: Found {num_nan_verts} NaN verts, {num_inf_verts} Inf verts, {num_nan_faces} NaN faces, {num_inf_faces} Inf faces")
 
     # Augment
     if args.num_augment > 0:
@@ -77,20 +54,6 @@ def train_mesh_decoder(args):
         t_aug = time() - t_aug
         print(f'Augmented data in {t_aug:.2f} seconds')
         
-        # Debug: Check for NaN values after augmentation
-        print("DEBUG: Checking for NaN values after augmentation...")
-        for i, mesh in enumerate(train_data):
-            verts = mesh.verts_packed()
-            faces = mesh.faces_packed()
-            has_nan_verts = torch.isnan(verts).any()
-            has_inf_verts = torch.isinf(verts).any()
-            has_nan_faces = torch.isnan(faces.float()).any()
-            has_inf_faces = torch.isinf(faces.float()).any()
-            # print(f"  Mesh {i}: verts NaN={has_nan_verts}, verts Inf={has_inf_verts}, faces NaN={has_nan_faces}, faces Inf={has_inf_faces}")
-            # if has_nan_verts or has_inf_verts or has_nan_faces or has_inf_faces:
-            #     print(f"  Mesh {i} has problematic values after augmentation!")
-            #     print(f"    Verts shape: {verts.shape}, min: {verts.min()}, max: {verts.max()}")
-            #     print(f"    Faces shape: {faces.shape}, min: {faces.min()}, max: {faces.max()}")
 
     # Train network
     trainer = MeshDecoderTrainer(log_wandb=(not args.no_wandb), **vars(args))
@@ -102,7 +65,7 @@ def train_local_mesh_decoder(args):
     if not args.no_wandb:
         wandb.init(
             project='local-mesh-decoder',
-            name=args.experiment_name or 'local-mesh-decoder',
+            name='local-mesh-decoder',
             config=args,
             dir=args.checkpoint_dir,
         )
@@ -145,7 +108,7 @@ def train_deep_sdf_decoder(args):
     if not args.no_wandb:
         wandb.init(
             project='deep-sdf',
-            name=args.experiment_name or 'deep-sdf',
+            name='deep-sdf',
             config=args,
             dir=args.checkpoint_dir,
         )
@@ -153,8 +116,9 @@ def train_deep_sdf_decoder(args):
     # Load data
     t_load = time()
     print('Loading data...')
-    data = load_npz_in_dir(args.data_path, keys=['points', 'sdf'])
-    train_data, val_data = split_dict_data(data, -args.num_val_samples)
+    data = load_meshes_in_dir(args.data_path)
+    train_data = data[:-args.num_val_samples]
+    val_data = data[-args.num_val_samples:]
     t_load = time() - t_load
     print(f'Loaded data in {t_load:.2f} seconds')
 
@@ -163,8 +127,8 @@ def train_deep_sdf_decoder(args):
         t_aug = time()
         print('Augmenting data...')
         seed_everything(args.data_random_seed)
-        train_data['points'] = augment_points(
-            train_data['points'],
+        train_data = augment_meshes(
+            train_data,
             num_augment=args.num_augment,
             num_anchor=args.pw_num_anchor,
             sample_type=args.pw_sample_type,
@@ -173,10 +137,6 @@ def train_deep_sdf_decoder(args):
             S_range=args.pw_s_range,
             T_range=args.pw_t_range,
             device=args.device,  # Will be forced to CPU in augment_meshes
-        )
-        train_data['sdf'] = train_data['sdf'].repeat_interleave(
-            args.num_augment,
-            dim=0,
         )
         t_aug = time() - t_aug
         print(f'Augmented data in {t_aug:.2f} seconds')
@@ -191,7 +151,7 @@ def train_siren_decoder(args):
     if not args.no_wandb:
         wandb.init(
             project='siren',
-            name=args.experiment_name or 'siren',
+            name='siren',
             config=args,
             dir=args.checkpoint_dir,
         )
@@ -234,7 +194,7 @@ def train_siren2_decoder(args):
     if not args.no_wandb:
         wandb.init(
             project='siren',
-            name=args.experiment_name or 'siren2',
+            name='siren2',
             config=args,
             dir=args.checkpoint_dir,
         )
@@ -277,7 +237,7 @@ def train_local_mod_siren_decoder(args):
     if not args.no_wandb:
         wandb.init(
             project='siren',
-            name=args.experiment_name or 'local-mod-siren',
+            name='local-mod-siren',
             config=args,
             dir=args.checkpoint_dir,
         )
@@ -320,7 +280,6 @@ def main(args):
 
     # General argument
     parser.add_argument('--device', type=str, default='cuda')
-    parser.add_argument('--experiment_name', default=None)
     parser.add_argument('--no_wandb', action='store_true')
 
     data_parser = parser.add_argument_group('Data')

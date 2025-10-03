@@ -1,3 +1,5 @@
+
+from tqdm import tqdm
 import sys
 import os
 import datetime
@@ -431,14 +433,56 @@ class LocalMeshDecoderTrainer:
         self.best_loss = np.inf
         self.best_epoch = -1
         self.best_epoch_losses = defaultdict(float)
+        
+        # Print available losses with non-zero weights at the beginning
+        print(f"\n{'='*70}")
+        print("ACTIVE LOSS COMPONENTS:")
+        print(f"{'='*70}")
+        active_losses = []
+        
+        # Check each loss component and its weight
+        loss_components = [
+            ('Chamfer', 1.0, 'Chamfer distance'),
+            ('Normal', self.weight_normal_loss, 'Normal consistency'),
+            ('Edge Length', self.weight_edge_loss, 'Edge length'),
+            ('Laplacian', self.weight_laplacian_loss, 'Laplacian smoothing'),
+            ('Quality', self.weight_quality_loss, 'Mesh quality'),
+            ('Norm', self.weight_norm_loss, 'Latent vector norm')
+        ]
+        
+        for loss_name, weight, description in loss_components:
+            if weight != 0:
+                active_losses.append((loss_name, weight, description))
+                print(f"  {loss_name:<12}: weight = {weight:>8.6f}  ({description})")
+        
+        if not active_losses:
+            print("  WARNING: No active loss components found!")
+        else:
+            print(f"\n  Total active components: {len(active_losses)}")
+        print(f"{'='*70}\n")
+        
         try:
-            for epoch in range(self.num_epochs):
-                print(f'Epoch {epoch + 1}')
+            from tqdm import tqdm
+            epoch_progress = tqdm(range(self.num_epochs), 
+                                desc='Training Progress',
+                                ncols=120,
+                                initial=0,
+                                total=self.num_epochs)
+            
+            for epoch in epoch_progress:
+                epoch_progress.set_description(f'Epoch {epoch + 1}/{self.num_epochs}')
                 epoch_profile_times = defaultdict(list)
                 epoch_losses = defaultdict(float)
                 num_epoch_batches = 0
                 t_epoch = time()
-                for batch_idxs in train_index_loader:
+                
+                # Create progress bar for this epoch
+                batch_progress = tqdm(train_index_loader, 
+                                    desc=f'Batches',
+                                    leave=False,
+                                    ncols=100)
+                
+                for batch_idxs in batch_progress:
                     num_epoch_batches += 1
 
                     # Prepare batch
@@ -462,12 +506,45 @@ class LocalMeshDecoderTrainer:
                     t_loss = time()
                     losses = self.compute_losses(preds, batch)
                     ramp = min(1.0, epoch / 100.0)
-                    loss = losses['chamfer'] \
-                         + self.weight_normal_loss * losses['normal'] \
-                         + self.weight_edge_loss * losses['edge_length'] \
-                         + self.weight_laplacian_loss * losses['laplacian'] \
-                         + self.weight_quality_loss * losses['quality'] \
-                         + self.weight_norm_loss * ramp * losses['norm']
+                    
+                    # Compute weighted loss components
+                    weighted_losses = {}
+                    loss = torch.tensor(0.0, device=self.device)
+                    
+                    # Chamfer loss (always weighted by 1.0)
+                    weighted_chamfer = losses['chamfer']
+                    loss += weighted_chamfer
+                    weighted_losses['chamfer'] = weighted_chamfer.mean().item()
+                    
+                    # Normal loss
+                    if self.weight_normal_loss != 0:
+                        weighted_normal = self.weight_normal_loss * losses['normal']
+                        loss += weighted_normal
+                        weighted_losses['normal'] = weighted_normal.mean().item()
+                    
+                    # Edge length loss
+                    if self.weight_edge_loss != 0:
+                        weighted_edge = self.weight_edge_loss * losses['edge_length']
+                        loss += weighted_edge
+                        weighted_losses['edge_length'] = weighted_edge.mean().item()
+                    
+                    # Laplacian loss
+                    if self.weight_laplacian_loss != 0:
+                        weighted_laplacian = self.weight_laplacian_loss * losses['laplacian']
+                        loss += weighted_laplacian
+                        weighted_losses['laplacian'] = weighted_laplacian.mean().item()
+                    
+                    # Quality loss
+                    if self.weight_quality_loss != 0:
+                        weighted_quality = self.weight_quality_loss * losses['quality']
+                        loss += weighted_quality
+                        weighted_losses['quality'] = weighted_quality.mean().item()
+                    
+                    # Norm loss (with ramp) - ensure it's a scalar
+                    if self.weight_norm_loss != 0:
+                        weighted_norm = self.weight_norm_loss * ramp * losses['norm'].mean()
+                        loss += weighted_norm
+                        weighted_losses['norm'] = weighted_norm.item()
 
                     loss = loss.mean()
                     t_loss = time() - t_loss
@@ -483,11 +560,31 @@ class LocalMeshDecoderTrainer:
 
                     # Accumulate losses
                     t_accum = time()
-                    epoch_losses['loss'] += loss
+                    epoch_losses['loss'] += loss.item()
                     for name, loss_val in losses.items():
-                        epoch_losses[name] += loss_val.mean()
+                        epoch_losses[name] += loss_val.mean().item()
                     t_accum = time() - t_accum
                     epoch_profile_times['accum'].append(t_accum)
+                    
+                    # Update progress bar with weighted loss components
+                    postfix_dict = {
+                        'Total': f'{loss.item():.4f}',
+                        'Chamfer': f'{weighted_losses.get("chamfer", 0.0):.4f}',
+                    }
+                    
+                    # Add other weighted loss components (only if active)
+                    if 'normal' in weighted_losses:
+                        postfix_dict['Normal'] = f"{weighted_losses['normal']:.4f}"
+                    if 'edge_length' in weighted_losses:
+                        postfix_dict['Edge'] = f"{weighted_losses['edge_length']:.4f}"
+                    if 'laplacian' in weighted_losses:
+                        postfix_dict['Laplacian'] = f"{weighted_losses['laplacian']:.4f}"
+                    if 'quality' in weighted_losses:
+                        postfix_dict['Quality'] = f"{weighted_losses['quality']:.4f}"
+                    if 'norm' in weighted_losses:
+                        postfix_dict['Norm'] = f"{weighted_losses['norm']:.4f}"
+                    
+                    batch_progress.set_postfix(postfix_dict)
 
                 # Compute mean epoch losses
                 for name in epoch_losses.keys():
@@ -520,6 +617,30 @@ class LocalMeshDecoderTrainer:
 
                 t_epoch = time() - t_epoch
                 self.profile_times['epoch'].append(t_epoch)
+
+                # Update epoch progress bar with weighted loss components
+                epoch_postfix = {
+                    'Total': f'{epoch_losses["loss"]:.4f}',
+                    'Chamfer': f'{epoch_losses["chamfer"]:.4f}',
+                }
+                
+                # Add weighted loss components for epoch summary (only if active)
+                if self.weight_normal_loss != 0:
+                    epoch_postfix['Normal'] = f'{self.weight_normal_loss * epoch_losses["normal"]:.4f}'
+                if self.weight_edge_loss != 0:
+                    epoch_postfix['Edge'] = f'{self.weight_edge_loss * epoch_losses["edge_length"]:.4f}'
+                if self.weight_laplacian_loss != 0:
+                    epoch_postfix['Laplacian'] = f'{self.weight_laplacian_loss * epoch_losses["laplacian"]:.4f}'
+                if self.weight_quality_loss != 0:
+                    epoch_postfix['Quality'] = f'{self.weight_quality_loss * epoch_losses["quality"]:.4f}'
+                if self.weight_norm_loss != 0:
+                    ramp = min(1.0, epoch / 100.0)
+                    epoch_postfix['Norm'] = f'{self.weight_norm_loss * ramp * epoch_losses["norm"]:.4f}'
+                
+                # Add timing info
+                epoch_postfix['Time'] = f'{t_epoch:.1f}s'
+                
+                epoch_progress.set_postfix(epoch_postfix)
 
                 # Logging
                 if self.log_wandb:

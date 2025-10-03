@@ -1,3 +1,5 @@
+
+from tqdm import tqdm
 import os
 import argparse
 import math
@@ -227,7 +229,7 @@ class SirenDecoderTrainer:
                 epoch_losses = defaultdict(float)
                 num_epoch_batches = 0
                 t_epoch = time()
-                for batch_idxs in train_index_loader:
+                for batch_idxs in tqdm(train_index_loader, desc="Training Batches", leave=False):
                     num_epoch_batches += 1
 
                     # Prepare batch

@@ -25,6 +25,7 @@ from pytorch3d.structures import (
     Meshes,
     join_meshes_as_batch,
 )
+from pytorch3d.io import save_obj
 from pytorch3d.loss import (
     chamfer_distance,
     mesh_edge_loss,
@@ -297,6 +298,8 @@ class MeshDecoderTrainer:
         parser.add_argument('--lr_reduce_factor', type=float, default=0.1)
         parser.add_argument('--lr_reduce_patience', type=int, default=100)
         parser.add_argument('--lr_reduce_min_lr', type=float, default=1e-5)
+        parser.add_argument('--save_shapes_every', type=int, default=1000)
+        parser.add_argument('--save_shapes_dir', type=str, default='./saved_shapes')
 
         # Misc. parameters
         parser.add_argument('--no_checkpoints', action='store_true')
@@ -345,6 +348,7 @@ class MeshDecoderTrainer:
             template_subdiv -= hparams['steps'] + 1
 
         self.template = pytorch3d.utils.ico_sphere(template_subdiv)
+        # self.template_scale_verts_(0.1)
         self.template.scale_verts_(0.1)
         if hparams['encoding'] == 'spherical_harmonics':
             self.template_encoding = torch.as_tensor(sph_encoding(
@@ -410,21 +414,6 @@ class MeshDecoderTrainer:
             
             # Debug: Check meshes before sampling
             batch_meshes = [m.to(self.device) for m in train_meshes[ib:ie]]
-            print(f"DEBUG: Checking batch {ib}-{ie} before sampling...")
-            for j, mesh in enumerate(batch_meshes):
-                verts = mesh.verts_packed()
-                faces = mesh.faces_packed()
-                has_nan_verts = torch.isnan(verts).any()
-                has_inf_verts = torch.isinf(verts).any()
-                has_nan_faces = torch.isnan(faces.float()).any()
-                has_inf_faces = torch.isinf(faces.float()).any()
-                # print(f"  Batch mesh {j}: verts NaN={has_nan_verts}, verts Inf={has_inf_verts}, faces NaN={has_nan_faces}, faces Inf={has_inf_faces}")
-                # if has_nan_verts or has_inf_verts or has_nan_faces or has_inf_faces:
-                #     print(f"  Batch mesh {j} has problematic values!")
-                #     print(f"    Verts shape: {verts.shape}, min: {verts.min()}, max: {verts.max()}")
-                #     print(f"    Faces shape: {faces.shape}, min: {faces.min()}, max: {faces.max()}")
-            
-            # Force CPU for PyTorch3D operations to avoid GPU compilation issues
             batch_meshes_cpu = [m.cpu() for m in batch_meshes]
             samples = sample_points_from_meshes(
                 join_meshes_as_batch(batch_meshes_cpu),
@@ -481,6 +470,38 @@ class MeshDecoderTrainer:
             factor=self.lr_reduce_factor,
             min_lr=self.lr_reduce_min_lr,
         )
+
+        # Create shapes directory if saving is enabled
+        if self.save_shapes_every > 0:
+            os.makedirs(self.save_shapes_dir, exist_ok=True)
+            self.shapes_saved_count = 0
+
+        # Print available losses with non-zero weights at the beginning
+        print(f"\n{'='*70}")
+        print("ACTIVE LOSS COMPONENTS:")
+        print(f"{'='*70}")
+        active_losses = []
+        
+        # Check each loss component and its weight
+        loss_components = [
+            ('Chamfer', 1.0, 'Chamfer distance'),
+            ('Normal', self.weight_normal_loss, 'Normal consistency'),
+            ('Edge Length', self.weight_edge_loss, 'Edge length'),
+            ('Laplacian', self.weight_laplacian_loss, 'Laplacian smoothing'),
+            ('Quality', self.weight_quality_loss, 'Mesh quality'),
+            ('Norm', self.weight_norm_loss, 'Latent vector norm')
+        ]
+        
+        for loss_name, weight, description in loss_components:
+            if weight != 0:
+                active_losses.append((loss_name, weight, description))
+                print(f"  {loss_name:<12}: weight = {weight:>8.6f}  ({description})")
+        
+        if not active_losses:
+            print("  WARNING: No active loss components found!")
+        else:
+            print(f"\n  Total active components: {len(active_losses)}")
+        print(f"{'='*70}\n")
 
         # Run training loop
         if self.resume_from is None:
@@ -539,12 +560,45 @@ class MeshDecoderTrainer:
                     t_loss = time()
                     losses = self.compute_losses(preds, batch)
                     ramp = min(1.0, epoch / 100.0)
-                    loss = losses['chamfer'] \
-                         + self.weight_normal_loss * losses['normal'] \
-                         + self.weight_edge_loss * losses['edge_length'] \
-                         + self.weight_laplacian_loss * losses['laplacian'] \
-                         + self.weight_quality_loss * losses['quality'] \
-                         + self.weight_norm_loss * ramp * losses['norm']
+                    
+                    # Compute weighted loss components
+                    weighted_losses = {}
+                    loss = torch.tensor(0.0, device=self.device)
+                    
+                    # Chamfer loss (always weighted by 1.0)
+                    weighted_chamfer = losses['chamfer']
+                    loss += weighted_chamfer
+                    weighted_losses['chamfer'] = weighted_chamfer.mean().item()
+                    
+                    # Normal loss
+                    if self.weight_normal_loss != 0:
+                        weighted_normal = self.weight_normal_loss * losses['normal']
+                        loss += weighted_normal
+                        weighted_losses['normal'] = weighted_normal.mean().item()
+                    
+                    # Edge length loss
+                    if self.weight_edge_loss != 0:
+                        weighted_edge = self.weight_edge_loss * losses['edge_length']
+                        loss += weighted_edge
+                        weighted_losses['edge_length'] = weighted_edge.mean().item()
+                    
+                    # Laplacian loss
+                    if self.weight_laplacian_loss != 0:
+                        weighted_laplacian = self.weight_laplacian_loss * losses['laplacian']
+                        loss += weighted_laplacian
+                        weighted_losses['laplacian'] = weighted_laplacian.mean().item()
+                    
+                    # Quality loss
+                    if self.weight_quality_loss != 0:
+                        weighted_quality = self.weight_quality_loss * losses['quality']
+                        loss += weighted_quality
+                        weighted_losses['quality'] = weighted_quality.mean().item()
+                    
+                    # Norm loss (with ramp) - ensure it's a scalar
+                    if self.weight_norm_loss != 0:
+                        weighted_norm = self.weight_norm_loss * ramp * losses['norm'].mean()
+                        loss += weighted_norm
+                        weighted_losses['norm'] = weighted_norm.item()
 
                     loss = loss.mean()
                     t_loss = time() - t_loss
@@ -566,11 +620,32 @@ class MeshDecoderTrainer:
                     t_accum = time() - t_accum
                     epoch_profile_times['accum'].append(t_accum)
                     
-                    # Update progress bar with current loss
-                    batch_progress.set_postfix({
-                        'loss': f'{loss.item():.6f}',
-                        'chamfer': f'{losses["chamfer"].mean().item():.6f}'
-                    })
+                    # Save shapes every N shapes if enabled
+                    if self.save_shapes_every > 0:
+                        self.shapes_saved_count += len(batch_idxs)
+                        if self.shapes_saved_count >= self.save_shapes_every:
+                            self._save_shapes(preds, batch, epoch, num_epoch_batches)
+                            self.shapes_saved_count = 0
+                    
+                    # Update progress bar with weighted loss components
+                    postfix_dict = {
+                        'Total': f'{loss.item():.4f}',
+                        'Chamfer': f'{weighted_losses.get("chamfer", 0.0):.4f}',
+                    }
+                    
+                    # Add other weighted loss components (only if active)
+                    if 'normal' in weighted_losses:
+                        postfix_dict['Normal'] = f"{weighted_losses['normal']:.4f}"
+                    if 'edge_length' in weighted_losses:
+                        postfix_dict['Edge'] = f"{weighted_losses['edge_length']:.4f}"
+                    if 'laplacian' in weighted_losses:
+                        postfix_dict['Laplacian'] = f"{weighted_losses['laplacian']:.4f}"
+                    if 'quality' in weighted_losses:
+                        postfix_dict['Quality'] = f"{weighted_losses['quality']:.4f}"
+                    if 'norm' in weighted_losses:
+                        postfix_dict['Norm'] = f"{weighted_losses['norm']:.4f}"
+                    
+                    batch_progress.set_postfix(postfix_dict)
 
                 # Remesh template if time
                 if (epoch + 1) % self.remesh_every == 0:
@@ -642,15 +717,32 @@ class MeshDecoderTrainer:
                     log_dict['prof/epoch'] = t_epoch
                     wandb.log(log_dict)
 
-                # Update epoch progress bar with final loss
-                epoch_progress.set_postfix({
-                    'loss': f'{epoch_losses["loss"]:.6f}',
-                    'chamfer': f'{epoch_losses["chamfer"]:.6f}',
-                    'time': f'{t_epoch:.2f}s'
-                })
+                # Update epoch progress bar with weighted loss components
+                epoch_postfix = {
+                    'Total': f'{epoch_losses["loss"]:.4f}',
+                    'Chamfer': f'{epoch_losses["chamfer"]:.4f}',
+                }
                 
-                print(f"Loss: {epoch_losses['loss']:.6g}, "
-                      f"{t_epoch:.4f} seconds")
+                # Add weighted loss components for epoch summary (only if active)
+                if self.weight_normal_loss != 0:
+                    epoch_postfix['Normal'] = f'{self.weight_normal_loss * epoch_losses["normal"]:.4f}'
+                if self.weight_edge_loss != 0:
+                    epoch_postfix['Edge'] = f'{self.weight_edge_loss * epoch_losses["edge_length"]:.4f}'
+                if self.weight_laplacian_loss != 0:
+                    epoch_postfix['Laplacian'] = f'{self.weight_laplacian_loss * epoch_losses["laplacian"]:.4f}'
+                if self.weight_quality_loss != 0:
+                    epoch_postfix['Quality'] = f'{self.weight_quality_loss * epoch_losses["quality"]:.4f}'
+                if self.weight_norm_loss != 0:
+                    ramp = min(1.0, epoch / 100.0)
+                    epoch_postfix['Norm'] = f'{self.weight_norm_loss * ramp * epoch_losses["norm"]:.4f}'
+                
+                # Add timing info
+                epoch_postfix['Time'] = f'{t_epoch:.1f}s'
+                
+                epoch_progress.set_postfix(epoch_postfix)
+                
+                # Print epoch summary with better formatting
+                print(f"Epoch {epoch+1:4d} | Loss: {epoch_losses['loss']:.6f} | Time: {t_epoch:.2f}s")
             else:
                 print('All epochs done')
                 epoch_progress.close()
@@ -663,6 +755,54 @@ class MeshDecoderTrainer:
         print('Training finished')
         self.print_training_summary()
 
+
+    def _save_shapes(self, preds, batch, epoch, batch_num):
+        """Save target and predicted shapes for visualization"""
+        with torch.no_grad():
+            # Get the final predicted mesh (last step)
+            pred_mesh = preds[-1]
+            
+            # Create target mesh from sampled points (approximate)
+            target_points = batch['target_points']
+            target_normals = batch['target_normals']
+            
+            # Save predicted meshes
+            for i in range(len(pred_mesh)):
+                pred_verts = pred_mesh.verts_list()[i].cpu()
+                pred_faces = pred_mesh.faces_list()[i].cpu()
+                
+                pred_filename = f"{self.save_shapes_dir}/pred_epoch{epoch}_batch{batch_num}_shape{i}.obj"
+                save_obj(pred_filename, pred_verts, pred_faces)
+            
+            # Save target point clouds as PLY files (since we don't have faces)
+            for i in range(len(target_points)):
+                target_pts = target_points[i].cpu()
+                target_norms = target_normals[i].cpu()
+                
+                target_filename = f"{self.save_shapes_dir}/target_epoch{epoch}_batch{batch_num}_shape{i}.ply"
+                self._save_point_cloud_ply(target_filename, target_pts, target_norms)
+            
+            print(f"Saved {len(pred_mesh)} shape pairs to {self.save_shapes_dir}")
+
+    def _save_point_cloud_ply(self, filename, points, normals):
+        """Save point cloud as PLY file"""
+        with open(filename, 'w') as f:
+            f.write("ply\n")
+            f.write("format ascii 1.0\n")
+            f.write(f"element vertex {len(points)}\n")
+            f.write("property float x\n")
+            f.write("property float y\n")
+            f.write("property float z\n")
+            f.write("property float nx\n")
+            f.write("property float ny\n")
+            f.write("property float nz\n")
+            f.write("end_header\n")
+            
+            for i in range(len(points)):
+                pt = points[i]
+                norm = normals[i]
+                f.write(f"{pt[0]:.6f} {pt[1]:.6f} {pt[2]:.6f} "
+                       f"{norm[0]:.6f} {norm[1]:.6f} {norm[2]:.6f}\n")
 
     def _remesh_template_from_mean_shape(self, edge_length_ratio):
         with torch.no_grad():

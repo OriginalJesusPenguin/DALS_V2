@@ -1,3 +1,4 @@
+from tqdm import tqdm
 import os
 import argparse
 import math
@@ -160,6 +161,7 @@ class LocalModSirenDecoderTrainer:
         parser.add_argument('--lr_reduce_factor', type=float, default=0.5)
 
         # Misc. parameters
+        
         parser.add_argument('--no_checkpoints', action='store_true')
         parser.add_argument('--checkpoint_postfix', type=str, default='')
         parser.add_argument('--checkpoint_dir', type=str, default='.')
@@ -289,14 +291,55 @@ class LocalModSirenDecoderTrainer:
         self.best_loss = np.inf
         self.best_epoch = -1
         self.best_epoch_losses = defaultdict(float)
+        
+        # Print available losses with non-zero weights at the beginning
+        print(f"\n{'='*70}")
+        print("ACTIVE LOSS COMPONENTS:")
+        print(f"{'='*70}")
+        active_losses = []
+        
+        # Check each loss component and its weight
+        loss_components = [
+            ('Grad', self.weight_grad_loss, 'Gradient loss'),
+            ('Zero Set', self.weight_zero_set_loss, 'Zero set loss'),
+            ('Normal Align', self.weight_normal_align_loss, 'Normal alignment'),
+            ('Nonzero Set', self.weight_nonzero_set_loss, 'Nonzero set loss'),
+            ('LV Norm', self.weight_lv_norm, 'Latent vector norm')
+        ]
+        
+        for loss_name, weight, description in loss_components:
+            if weight != 0:
+                active_losses.append((loss_name, weight, description))
+                print(f"  {loss_name:<12}: weight = {weight:>8.6f}  ({description})")
+        
+        if not active_losses:
+            print("  WARNING: No active loss components found!")
+        else:
+            print(f"\n  Total active components: {len(active_losses)}")
+        print(f"{'='*70}\n")
+        
         try:
-            for epoch in range(self.num_epochs):
-                print(f'Epoch {epoch + 1}')
+            from tqdm import tqdm
+            epoch_progress = tqdm(range(self.num_epochs), 
+                                desc='Training Progress',
+                                ncols=120,
+                                initial=0,
+                                total=self.num_epochs)
+            
+            for epoch in epoch_progress:
+                epoch_progress.set_description(f'Epoch {epoch + 1}/{self.num_epochs}')
                 epoch_profile_times = defaultdict(list)
                 epoch_losses = defaultdict(float)
                 num_epoch_batches = 0
                 t_epoch = time()
-                for batch_idxs in train_index_loader:
+                
+                # Create progress bar for this epoch
+                batch_progress = tqdm(train_index_loader, 
+                                    desc=f'Batches',
+                                    leave=False,
+                                    ncols=100)
+                
+                for batch_idxs in batch_progress:
                     num_epoch_batches += 1
 
                     # Prepare batch
@@ -325,11 +368,41 @@ class LocalModSirenDecoderTrainer:
                     t_loss = time()
                     losses = self.compute_losses(preds, batch)
                     ramp = min(1.0, epoch / 100.0)
-                    loss = self.weight_grad_loss * losses['grad'] \
-                         + self.weight_zero_set_loss * losses['zero_set'] \
-                         + self.weight_normal_align_loss * losses['normal_align'] \
-                         + self.weight_nonzero_set_loss * losses['nonzero_set'] \
-                         + self.weight_lv_norm * ramp * losses['lv_norm']
+                    
+                    # Compute weighted loss components
+                    weighted_losses = {}
+                    loss = torch.tensor(0.0, device=self.device)
+                    
+                    # Gradient loss
+                    if self.weight_grad_loss != 0:
+                        weighted_grad = self.weight_grad_loss * losses['grad']
+                        loss += weighted_grad
+                        weighted_losses['grad'] = weighted_grad.item()
+                    
+                    # Zero set loss
+                    if self.weight_zero_set_loss != 0:
+                        weighted_zero_set = self.weight_zero_set_loss * losses['zero_set']
+                        loss += weighted_zero_set
+                        weighted_losses['zero_set'] = weighted_zero_set.item()
+                    
+                    # Normal align loss
+                    if self.weight_normal_align_loss != 0:
+                        weighted_normal_align = self.weight_normal_align_loss * losses['normal_align']
+                        loss += weighted_normal_align
+                        weighted_losses['normal_align'] = weighted_normal_align.item()
+                    
+                    # Nonzero set loss
+                    if self.weight_nonzero_set_loss != 0:
+                        weighted_nonzero_set = self.weight_nonzero_set_loss * losses['nonzero_set']
+                        loss += weighted_nonzero_set
+                        weighted_losses['nonzero_set'] = weighted_nonzero_set.item()
+                    
+                    # LV norm loss (with ramp)
+                    if self.weight_lv_norm != 0:
+                        weighted_lv_norm = self.weight_lv_norm * ramp * losses['lv_norm']
+                        loss += weighted_lv_norm
+                        weighted_losses['lv_norm'] = weighted_lv_norm.item()
+                    
                     t_loss = time() - t_loss
                     epoch_profile_times['loss'].append(t_loss)
 
@@ -343,11 +416,30 @@ class LocalModSirenDecoderTrainer:
 
                     # Accumulate losses
                     t_accum = time()
-                    epoch_losses['loss'] += loss
+                    epoch_losses['loss'] += loss.item()
                     for name, loss_val in losses.items():
-                        epoch_losses[name] += loss_val
+                        epoch_losses[name] += loss_val.item()
                     t_accum = time() - t_accum
                     epoch_profile_times['accum'].append(t_accum)
+                    
+                    # Update progress bar with weighted loss components
+                    postfix_dict = {
+                        'Total': f'{loss.item():.4f}',
+                    }
+                    
+                    # Add weighted loss components (only if active)
+                    if 'grad' in weighted_losses:
+                        postfix_dict['Grad'] = f"{weighted_losses['grad']:.4f}"
+                    if 'zero_set' in weighted_losses:
+                        postfix_dict['ZeroSet'] = f"{weighted_losses['zero_set']:.4f}"
+                    if 'normal_align' in weighted_losses:
+                        postfix_dict['NormalAlign'] = f"{weighted_losses['normal_align']:.4f}"
+                    if 'nonzero_set' in weighted_losses:
+                        postfix_dict['NonzeroSet'] = f"{weighted_losses['nonzero_set']:.4f}"
+                    if 'lv_norm' in weighted_losses:
+                        postfix_dict['LVNorm'] = f"{weighted_losses['lv_norm']:.4f}"
+                    
+                    batch_progress.set_postfix(postfix_dict)
 
                 # Compute mean epoch losses
                 for name in epoch_losses.keys():
@@ -380,6 +472,29 @@ class LocalModSirenDecoderTrainer:
 
                 t_epoch = time() - t_epoch
                 self.profile_times['epoch'].append(t_epoch)
+
+                # Update epoch progress bar with weighted loss components
+                epoch_postfix = {
+                    'Total': f'{epoch_losses["loss"]:.4f}',
+                }
+                
+                # Add weighted loss components for epoch summary (only if active)
+                if self.weight_grad_loss != 0:
+                    epoch_postfix['Grad'] = f'{self.weight_grad_loss * epoch_losses["grad"]:.4f}'
+                if self.weight_zero_set_loss != 0:
+                    epoch_postfix['ZeroSet'] = f'{self.weight_zero_set_loss * epoch_losses["zero_set"]:.4f}'
+                if self.weight_normal_align_loss != 0:
+                    epoch_postfix['NormalAlign'] = f'{self.weight_normal_align_loss * epoch_losses["normal_align"]:.4f}'
+                if self.weight_nonzero_set_loss != 0:
+                    epoch_postfix['NonzeroSet'] = f'{self.weight_nonzero_set_loss * epoch_losses["nonzero_set"]:.4f}'
+                if self.weight_lv_norm != 0:
+                    ramp = min(1.0, epoch / 100.0)
+                    epoch_postfix['LVNorm'] = f'{self.weight_lv_norm * ramp * epoch_losses["lv_norm"]:.4f}'
+                
+                # Add timing info
+                epoch_postfix['Time'] = f'{t_epoch:.1f}s'
+                
+                epoch_progress.set_postfix(epoch_postfix)
 
                 # Logging
                 if self.log_wandb:
