@@ -7,4 +7,10 @@ wandb
 *.cpkt
 *.pt
 *.ipynb
-/home/ralbe/DALS/mesh_autodecoder/jupyter_notebooks/*
+*.err
+*.out
+output/
+data/
+jupyter_notebooks/
+scripts/rami_scripts/*.err
+scripts/rami_scripts/*.out
