@@ -15,6 +15,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from tqdm import trange
 
 from skimage.measure import marching_cubes
 
@@ -25,7 +26,12 @@ from pytorch3d.ops import sample_points_from_meshes
 from util import seed_everything
 from util.data import load_meshes_in_dir
 from util.metrics import point_metrics, self_intersections
-from util.remesh import remesh_bk
+try:
+    from util.remesh import remesh_bk
+except ImportError:
+    print("Warning: Could not import remesh_bk, using identity function")
+    def remesh_bk(mesh):
+        return mesh
 from model.loss import mesh_bl_quality_loss
 from model.deep_sdf_decoder import DeepSdfDecoder
 
@@ -35,9 +41,14 @@ parser.add_argument('--checkpoint_dir')
 parser.add_argument('--checkpoint_jobid')
 parser.add_argument('--output_dir', default='.')
 parser.add_argument('--lr', type=float, default=2e-3)
+
 parser.add_argument('--num_point_samples', type=int, default=2500)
 parser.add_argument('--max_iters', type=int, default=1000)
 parser.add_argument('--voxel_res', type=int, default=128)
+# parser.add_argument('--num_point_samples', type=int, default=250)
+# parser.add_argument('--max_iters', type=int, default=100)
+# parser.add_argument('--voxel_res', type=int, default=64)
+
 parser.add_argument('--remesh_at_end', action='store_true')
 parser.add_argument('--train_test_split_idx', type=int, default=0)
 args = parser.parse_args()
@@ -47,9 +58,12 @@ print(args)
 #jobid = 12683871
 #checkpoint_path = f'/work1/patmjen/meshfit/experiments/deep_sdf/sd_{jobid}/trial_0/'
 
-checkpoint_path = sorted(glob(join(args.checkpoint_dir, '*.ckpt')))[-1]
+# checkpoint_path = sorted(glob(join(args.checkpoint_dir, '*.ckpt')))[-1]
+# checkpoint_path = '/home/ralbe/DALS/mesh_autodecoder/DeepSdfDecoderTrainer_2025-10-03_16-38.ckpt'
+checkpoint_path = '/home/ralbe/DALS/mesh_autodecoder/DeepSdfDecoderTrainer_2025-10-03_16-49.ckpt'
 print('Loading checkpoint', checkpoint_path)
-checkpoint = torch.load(checkpoint_path)
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+checkpoint = torch.load(checkpoint_path, map_location=device)
 
 hparams = checkpoint['hparams']
 
@@ -68,11 +82,12 @@ decoder = DeepSdfDecoder(
 decoder.load_state_dict(checkpoint['decoder_state_dict'])
 decoder = decoder.eval()
 decoder.requires_grad_(False)
-decoder.cuda()
+decoder.to(device)
 
 latent_vectors = checkpoint['latent_vectors']
 latent_vectors = latent_vectors.eval()
 latent_vectors.requires_grad_(False)
+latent_vectors.to(device)
 
 @torch.no_grad()
 def eval_decoder(decoder, lv, points):
@@ -85,7 +100,7 @@ def decode_to_mesh(decoder, lv, grid_size, thr=0, batch_size=None, loadbar=False
     if lv.ndim == 1:
         lv = lv.unsqueeze(0)
     if batch_size is None:
-        points_device = None
+        points_device = lv.device
         batch_size = grid_size ** 3
     else:
         points_device = lv.device
@@ -99,11 +114,11 @@ def decode_to_mesh(decoder, lv, grid_size, thr=0, batch_size=None, loadbar=False
     t_points = time() - t_points
 
     t_forward = time()
-    sdf = torch.empty(len(points))
+    sdf = torch.empty(len(points), device=device)
     range_fn = trange if loadbar else range
     for ib in range_fn(0, len(points), batch_size):
         ie = min(len(points), ib + batch_size)
-        sdf_batch = eval_decoder(decoder, lv, points[ib:ie].to(device)).cpu()
+        sdf_batch = eval_decoder(decoder, lv, points[ib:ie])
         sdf[ib:ie] = sdf_batch.squeeze()
 
     sdf = sdf.view(grid_size, grid_size, grid_size).unsqueeze(0)
@@ -111,7 +126,18 @@ def decode_to_mesh(decoder, lv, grid_size, thr=0, batch_size=None, loadbar=False
 
     t_mc = time()
     # mesh = cubify(-sdf, -thr)
-    verts, faces, _, _ = marching_cubes(-sdf.numpy()[0], -thr)
+    sdf_np = sdf.cpu().numpy()[0]
+    
+    # Adjust threshold if it's outside the SDF data range
+    sdf_min, sdf_max = sdf_np.min(), sdf_np.max()
+    level = -thr  # marching_cubes expects the level parameter
+    
+    if level < sdf_min or level > sdf_max:
+        # Use a level within the data range
+        level = sdf_min + 0.1 * (sdf_max - sdf_min)
+        print(f"Adjusted level to {level} (was {level + thr} outside range [{sdf_min}, {sdf_max}])")
+    
+    verts, faces, _, _ = marching_cubes(sdf_np, level)
     mesh = Meshes(torch.from_numpy(verts.copy()[:, [2, 1, 0]]).unsqueeze(0), torch.from_numpy(faces.copy()).unsqueeze(0))
     t_mc = time() - t_mc
 
@@ -120,8 +146,11 @@ def decode_to_mesh(decoder, lv, grid_size, thr=0, batch_size=None, loadbar=False
 print('Loading data from:', args.data_path)
 meshes = load_meshes_in_dir(args.data_path, loadbar=False)
 
+# Ensure output directory exists
+import os
+os.makedirs(args.output_dir, exist_ok=True)
+
 num_points = args.num_point_samples
-device = 'cuda'
 lr = args.lr
 max_iter = args.max_iters
 
@@ -136,10 +165,10 @@ all_meshes_001 = []
 for i, true_mesh in enumerate(meshes):
     print(f'{i}')
     true_mesh = true_mesh.to(device)
-    points = sample_points_from_meshes(true_mesh, num_points)[0]
+    points = sample_points_from_meshes(true_mesh, num_points)[0].to(device)
     sdf_true = torch.zeros(num_points, device=device)
 
-    lv = torch.mean(latent_vectors.weight.data, dim=0)
+    lv = torch.mean(latent_vectors.weight.data, dim=0).to(device)
     lv.requires_grad = True
 
     optimizer = torch.optim.Adam([lv], lr=lr)
@@ -176,15 +205,17 @@ for i, true_mesh in enumerate(meshes):
         mesh, sdf, prof_times = decode_to_mesh(decoder, lv, res, thr=0.0, batch_size=2*128**3)
 
         mesh.scale_verts_(2/res)
-        mesh.offset_verts_(torch.tensor([-1, -1, -1]))
+        mesh.offset_verts_(torch.tensor([-1, -1, -1], device=mesh.device))
 
         if args.remesh_at_end:
             mesh = remesh_bk(mesh)
 
         all_meshes_0.append(mesh)
 
-        true_point_samples = sample_points_from_meshes(true_mesh.cuda(), 100000)
-        pred_point_samples = sample_points_from_meshes(mesh.cuda(), 100000)
+        # Ensure both meshes are on the same device for sampling/metrics
+        mesh = mesh.to(device)
+        true_point_samples = sample_points_from_meshes(true_mesh, 2000)
+        pred_point_samples = sample_points_from_meshes(mesh, 2000)
 
         metrics = point_metrics(true_point_samples, pred_point_samples, [0.02, 0.04])
         metrics[f'ChamferL2 x {cf}'] = chamfer_distance(true_point_samples, pred_point_samples)[0] * cf
@@ -195,34 +226,51 @@ for i, true_mesh in enumerate(meshes):
             metrics[f'Decode/{k}'] = v
 
         all_metrics_0.append(metrics)
-    except:
+    except Exception as e:
+        print(f"[WARN] decode_to_mesh failed for thr=0.0: {e}")
         got_0_level_set = False
 
+    try:
+        mesh, sdf, prof_times = decode_to_mesh(decoder, lv, res, thr=0.001, batch_size=2*128**3)
 
-    mesh, sdf, prof_times = decode_to_mesh(decoder, lv, res, thr=0.001, batch_size=2*128**3)
+        mesh.scale_verts_(2/res)
+        mesh.offset_verts_(torch.tensor([-1, -1, -1], device=mesh.device))
 
-    mesh.scale_verts_(2/res)
-    mesh.offset_verts_(torch.tensor([-1, -1, -1]))
+        if args.remesh_at_end:
+            mesh = remesh_bk(mesh)
 
-    if args.remesh_at_end:
-        mesh = remesh_bk(mesh)
+        all_meshes_001.append(mesh)
 
-    all_meshes_001.append(mesh)
+        # Ensure both meshes are on the same device for sampling/metrics
+        mesh = mesh.to(device)
+        true_point_samples = sample_points_from_meshes(true_mesh, 2000)
+        pred_point_samples = sample_points_from_meshes(mesh, 2000)
 
-    true_point_samples = sample_points_from_meshes(true_mesh.cuda(), 100000)
-    pred_point_samples = sample_points_from_meshes(mesh.cuda(), 100000)
+        metrics = point_metrics(true_point_samples, pred_point_samples, [0.02, 0.04])
+        metrics[f'ChamferL2 x {cf}'] = chamfer_distance(true_point_samples, pred_point_samples)[0] * cf
+        metrics['BL quality'] = 1.0 - mesh_bl_quality_loss(mesh)
+        metrics['No. ints.'] = 100 * float(self_intersections(mesh.cpu())[0][0]) / len(mesh.faces_packed())
+        metrics['Search'] = t1 - t0
+        for k, v in prof_times.items():
+            metrics[f'Decode/{k}'] = v
 
-    metrics = point_metrics(true_point_samples, pred_point_samples, [0.02, 0.04])
-    metrics[f'ChamferL2 x {cf}'] = chamfer_distance(true_point_samples, pred_point_samples)[0] * cf
-    metrics['BL quality'] = 1.0 - mesh_bl_quality_loss(mesh)
-    metrics['No. ints.'] = 100 * float(self_intersections(mesh.cpu())[0][0]) / len(mesh.faces_packed())
-    metrics['Search'] = t1 - t0
-    for k, v in prof_times.items():
-        metrics[f'Decode/{k}'] = v
-
-    all_metrics_001.append(metrics)
-    if not got_0_level_set:
-        all_metrics_0.append(metrics)
+        all_metrics_001.append(metrics)
+        if not got_0_level_set:
+            all_metrics_0.append(metrics)
+    except Exception as e:
+        print(f"[WARN] decode_to_mesh failed for thr=0.001: {e}")
+        # Create dummy metrics for failed case
+        dummy_metrics = {
+            f'ChamferL2 x {cf}': float('inf'),
+            'BL quality': 0.0,
+            'No. ints.': float('inf'),
+            'Search': t1 - t0,
+            'Recall@0.02': 0.0,
+            'Recall@0.04': 0.0,
+        }
+        all_metrics_001.append(dummy_metrics)
+        if not got_0_level_set:
+            all_metrics_0.append(dummy_metrics)
 
 print('Done')
 

@@ -61,10 +61,7 @@ python -u train.py \
     --data_path="/home/ralbe/pyhppc_project/cirr_segm_clean/unit_sphere_meshes" \
     --num_augment=10 \
     --num_val_samples=40 \
-    --experiment_name="MD${EXP_POSTFIX}/${TRIAL_ID}" \
     local_mesh_decoder \
-    --checkpoint_postfix=${EXP_POSTFIX} \
-    --checkpoint_dir=${EXP_DIR} \
     --decoder_mode="mlp" \
     --num_epochs=99999 \
     --latent_features=12 \

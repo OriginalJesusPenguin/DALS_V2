@@ -38,6 +38,38 @@ import wandb
 from util import seed_everything
 
 
+def compute_dice_score(pred, target, threshold=0.5):
+    """
+    Compute Dice score for binary segmentation.
+    
+    Args:
+        pred: Predicted probabilities [B, C, H, W, D] or [B, C, H, W]
+        target: Ground truth labels [B, C, H, W, D] or [B, C, H, W]
+        threshold: Threshold for converting probabilities to binary predictions
+    
+    Returns:
+        Average dice score across batch
+    """
+    # Convert probabilities to binary predictions
+    pred_binary = (torch.softmax(pred, dim=1)[:, 1] > threshold).float()
+    
+    # Handle target - if it has 2 channels, use the second one, otherwise use the first
+    if target.shape[1] == 2:
+        target_binary = target[:, 1].float()
+    else:
+        target_binary = target[:, 0].float()
+    
+    # Compute intersection and union
+    intersection = (pred_binary * target_binary).sum(dim=(1, 2, 3))
+    union = pred_binary.sum(dim=(1, 2, 3)) + target_binary.sum(dim=(1, 2, 3))
+    
+    # Compute dice score for each sample in batch
+    dice_scores = (2.0 * intersection) / (union + 1e-8)
+    
+    # Return average dice score across batch
+    return dice_scores.mean().item()
+
+
 def _get_kernels_strides(sizes, spacings):
     # From MONAI DynUNet examaple
     # https://github.com/Project-MONAI/tutorials/blob/master/modules/dynunet_pipeline/create_network.py
@@ -256,7 +288,7 @@ class ConvNetTrainer:
                 print(f"Epoch: {epoch + 1}")
                 losses = defaultdict(float)
                 profile_times = defaultdict(float)
-                
+                dice_scores = []
 
                 num_epoch_batches = 0
                 t_epoch = time()
@@ -303,9 +335,17 @@ class ConvNetTrainer:
                     profile_times['optim'] += time() - t_optim
 
                     losses['loss'] += loss.item()
+                    
+                    # Compute dice score for this batch
+                    with torch.no_grad():
+                        dice_score = compute_dice_score(pred, batch['labels'])
+                        dice_scores.append(dice_score)
 
                 for key in losses.keys():
                     losses[key] /= num_epoch_batches
+                
+                # Compute average dice score for this epoch
+                avg_dice = np.mean(dice_scores) if dice_scores else 0.0
 
                 for key in profile_times.keys():
                     profile_times[key] /= num_epoch_batches
@@ -355,9 +395,11 @@ class ConvNetTrainer:
                         log_dict[f'Loss/{key}'] = val
                     for key, val in profile_times.items():
                         log_dict[f'Prof/{key}'] = val
+                    log_dict['Dice/Train'] = avg_dice
                     wandb.log(log_dict)
 
                 print(f"Loss: {losses['loss']:.6g}, "
+                      f"Dice: {avg_dice:.4f}, "
                       f"{profile_times['epoch']:.4f} seconds")
 
         except KeyboardInterrupt:

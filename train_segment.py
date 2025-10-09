@@ -89,7 +89,7 @@ def main(argv):
     parser = argparse.ArgumentParser()
 
     # General arguments
-    parser.add_argument('--device', type=str, default='cuda')
+    parser.add_argument('--device', type=str, default='cuda' if torch.cuda.is_available() else 'cpu')
     parser.add_argument('--experiment_name', default=None)
     parser.add_argument('--no_wandb', action='store_true')
 

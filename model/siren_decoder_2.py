@@ -78,7 +78,7 @@ class SirenDecoderTrainer:
 
         # Training parameters
         parser.add_argument('--num_epochs', type=int, default=10001)
-        parser.add_argument('--batch_size', type=int, default=64)
+        parser.add_argument('--batch_size', type=int, default=8)
         parser.add_argument('--weight_grad_loss', type=float, default=5e1)
         parser.add_argument('--weight_zero_set_loss', type=float, default=3e3)
         parser.add_argument('--weight_normal_align_loss', type=float,
@@ -86,11 +86,12 @@ class SirenDecoderTrainer:
         parser.add_argument('--weight_nonzero_set_loss', type=float,
                             default=1e2)
         parser.add_argument('--weight_lv_norm', type=float, default=1e-4)
-        parser.add_argument('--num_point_samples', type=int, default=20000)
+        parser.add_argument('--num_point_samples', type=int, default=5000)
         parser.add_argument('--learning_rate_net', type=float, default=1e-4)
         parser.add_argument('--learning_rate_lv', type=float, default=1e-4)
         parser.add_argument('--lr_step', type=int, default=500)
         parser.add_argument('--lr_reduce_factor', type=float, default=0.5)
+        parser.add_argument('--gradient_accumulation_steps', type=int, default=8)
 
         # Misc. parameters
         parser.add_argument('--no_checkpoints', action='store_true')
@@ -222,14 +223,55 @@ class SirenDecoderTrainer:
         self.best_loss = np.inf
         self.best_epoch = -1
         self.best_epoch_losses = defaultdict(float)
+        
+        # Print available losses with non-zero weights at the beginning
+        print(f"\n{'='*70}")
+        print("ACTIVE LOSS COMPONENTS:")
+        print(f"{'='*70}")
+        active_losses = []
+        
+        # Check each loss component and its weight
+        loss_components = [
+            ('Grad', self.weight_grad_loss, 'Gradient loss'),
+            ('Zero Set', self.weight_zero_set_loss, 'Zero set loss'),
+            ('Normal Align', self.weight_normal_align_loss, 'Normal alignment'),
+            ('Nonzero Set', self.weight_nonzero_set_loss, 'Nonzero set loss'),
+            ('LV Norm', self.weight_lv_norm, 'Latent vector norm')
+        ]
+        
+        for loss_name, weight, description in loss_components:
+            if weight != 0:
+                active_losses.append((loss_name, weight, description))
+                print(f"  {loss_name:<12}: weight = {weight:>8.6f}  ({description})")
+        
+        if not active_losses:
+            print("  WARNING: No active loss components found!")
+        else:
+            print(f"\n  Total active components: {len(active_losses)}")
+        print(f"{'='*70}\n")
+        
         try:
-            for epoch in range(self.num_epochs):
-                print(f'Epoch {epoch + 1}')
+            from tqdm import tqdm
+            epoch_progress = tqdm(range(self.num_epochs), 
+                                desc='Training Progress',
+                                ncols=120,
+                                initial=0,
+                                total=self.num_epochs)
+            
+            for epoch in epoch_progress:
+                epoch_progress.set_description(f'Epoch {epoch + 1}/{self.num_epochs}')
                 epoch_profile_times = defaultdict(list)
                 epoch_losses = defaultdict(float)
                 num_epoch_batches = 0
                 t_epoch = time()
-                for batch_idxs in tqdm(train_index_loader, desc="Training Batches", leave=False):
+                
+                # Create progress bar for this epoch
+                batch_progress = tqdm(train_index_loader, 
+                                    desc=f'Batches',
+                                    leave=False,
+                                    ncols=100)
+                
+                for batch_idx, batch_idxs in enumerate(batch_progress):
                     num_epoch_batches += 1
 
                     # Prepare batch
@@ -258,29 +300,100 @@ class SirenDecoderTrainer:
                     t_loss = time()
                     losses = self.compute_losses(preds, batch)
                     ramp = min(1.0, epoch / 100.0)
-                    loss = self.weight_grad_loss * losses['grad'] \
-                         + self.weight_zero_set_loss * losses['zero_set'] \
-                         + self.weight_normal_align_loss * losses['normal_align'] \
-                         + self.weight_nonzero_set_loss * losses['nonzero_set'] \
-                         + self.weight_lv_norm * ramp * losses['lv_norm']
+                    
+                    # Compute weighted loss components
+                    weighted_losses = {}
+                    loss = torch.tensor(0.0, device=self.device)
+                    
+                    # Gradient loss
+                    if self.weight_grad_loss != 0:
+                        weighted_grad = self.weight_grad_loss * losses['grad']
+                        loss += weighted_grad
+                        weighted_losses['grad'] = weighted_grad.item()
+                    
+                    # Zero set loss
+                    if self.weight_zero_set_loss != 0:
+                        weighted_zero_set = self.weight_zero_set_loss * losses['zero_set']
+                        loss += weighted_zero_set
+                        weighted_losses['zero_set'] = weighted_zero_set.item()
+                    
+                    # Normal align loss
+                    if self.weight_normal_align_loss != 0:
+                        weighted_normal_align = self.weight_normal_align_loss * losses['normal_align']
+                        loss += weighted_normal_align
+                        weighted_losses['normal_align'] = weighted_normal_align.item()
+                    
+                    # Nonzero set loss
+                    if self.weight_nonzero_set_loss != 0:
+                        weighted_nonzero_set = self.weight_nonzero_set_loss * losses['nonzero_set']
+                        loss += weighted_nonzero_set
+                        weighted_losses['nonzero_set'] = weighted_nonzero_set.item()
+                    
+                    # LV norm loss (with ramp)
+                    if self.weight_lv_norm != 0:
+                        weighted_lv_norm = self.weight_lv_norm * ramp * losses['lv_norm']
+                        loss += weighted_lv_norm
+                        weighted_losses['lv_norm'] = weighted_lv_norm.item()
+                    
+                    # Scale loss by accumulation steps
+                    loss = loss / self.gradient_accumulation_steps
+                    
                     t_loss = time() - t_loss
                     epoch_profile_times['loss'].append(t_loss)
 
-                    # Update weights
+                    # Backward pass
                     t_optim = time()
-                    self.optimizer.zero_grad()
                     loss.backward()
-                    self.optimizer.step()
+                    
+                    # Update weights only after accumulating gradients
+                    if (batch_idx + 1) % self.gradient_accumulation_steps == 0:
+                        self.optimizer.step()
+                        self.optimizer.zero_grad()
                     t_optim = time() - t_optim
                     epoch_profile_times['optim'].append(t_optim)
 
                     # Accumulate losses
                     t_accum = time()
-                    epoch_losses['loss'] += loss
+                    epoch_losses['loss'] += loss.item()
                     for name, loss_val in losses.items():
-                        epoch_losses[name] += loss_val
+                        epoch_losses[name] += loss_val.item()
                     t_accum = time() - t_accum
                     epoch_profile_times['accum'].append(t_accum)
+                    
+                    # Update progress bar with weighted loss components and percentages
+                    total_loss = loss.item()
+                    contributions = []
+                    
+                    # Calculate percentages for active losses
+                    if 'grad' in weighted_losses:
+                        grad_pct = (weighted_losses['grad'] / total_loss) * 100
+                        contributions.append(f"Grad/{grad_pct:.0f}%")
+                    
+                    if 'zero_set' in weighted_losses:
+                        zero_set_pct = (weighted_losses['zero_set'] / total_loss) * 100
+                        contributions.append(f"ZeroSet/{zero_set_pct:.0f}%")
+                    
+                    if 'normal_align' in weighted_losses:
+                        normal_align_pct = (weighted_losses['normal_align'] / total_loss) * 100
+                        contributions.append(f"NormalAlign/{normal_align_pct:.0f}%")
+                    
+                    if 'nonzero_set' in weighted_losses:
+                        nonzero_set_pct = (weighted_losses['nonzero_set'] / total_loss) * 100
+                        contributions.append(f"NonzeroSet/{nonzero_set_pct:.0f}%")
+                    
+                    if 'lv_norm' in weighted_losses:
+                        lv_norm_pct = (weighted_losses['lv_norm'] / total_loss) * 100
+                        contributions.append(f"LVNorm/{lv_norm_pct:.0f}%")
+                    
+                    # Format contributions string
+                    contributions_str = "/".join(contributions)
+                    
+                    postfix_dict = {
+                        'Total': f'{total_loss:.4f}',
+                        'Contributions': f'{contributions_str}'
+                    }
+                    
+                    batch_progress.set_postfix(postfix_dict)
 
                 # Compute mean epoch losses
                 for name in epoch_losses.keys():
@@ -314,6 +427,57 @@ class SirenDecoderTrainer:
                 t_epoch = time() - t_epoch
                 self.profile_times['epoch'].append(t_epoch)
 
+                # Update epoch progress bar with weighted loss components and percentages
+                total_epoch_loss = epoch_losses["loss"]
+                epoch_contributions = []
+                
+                # Calculate weighted losses for epoch summary
+                weighted_epoch_losses = {}
+                
+                if self.weight_grad_loss != 0:
+                    weighted_epoch_losses['grad'] = self.weight_grad_loss * epoch_losses["grad"]
+                if self.weight_zero_set_loss != 0:
+                    weighted_epoch_losses['zero_set'] = self.weight_zero_set_loss * epoch_losses["zero_set"]
+                if self.weight_normal_align_loss != 0:
+                    weighted_epoch_losses['normal_align'] = self.weight_normal_align_loss * epoch_losses["normal_align"]
+                if self.weight_nonzero_set_loss != 0:
+                    weighted_epoch_losses['nonzero_set'] = self.weight_nonzero_set_loss * epoch_losses["nonzero_set"]
+                if self.weight_lv_norm != 0:
+                    ramp = min(1.0, epoch / 100.0)
+                    weighted_epoch_losses['lv_norm'] = self.weight_lv_norm * ramp * epoch_losses["lv_norm"]
+                
+                # Calculate percentages for active losses
+                if 'grad' in weighted_epoch_losses:
+                    grad_pct = (weighted_epoch_losses['grad'] / total_epoch_loss) * 100
+                    epoch_contributions.append(f"Grad/{grad_pct:.0f}%")
+                
+                if 'zero_set' in weighted_epoch_losses:
+                    zero_set_pct = (weighted_epoch_losses['zero_set'] / total_epoch_loss) * 100
+                    epoch_contributions.append(f"ZeroSet/{zero_set_pct:.0f}%")
+                
+                if 'normal_align' in weighted_epoch_losses:
+                    normal_align_pct = (weighted_epoch_losses['normal_align'] / total_epoch_loss) * 100
+                    epoch_contributions.append(f"NormalAlign/{normal_align_pct:.0f}%")
+                
+                if 'nonzero_set' in weighted_epoch_losses:
+                    nonzero_set_pct = (weighted_epoch_losses['nonzero_set'] / total_epoch_loss) * 100
+                    epoch_contributions.append(f"NonzeroSet/{nonzero_set_pct:.0f}%")
+                
+                if 'lv_norm' in weighted_epoch_losses:
+                    lv_norm_pct = (weighted_epoch_losses['lv_norm'] / total_epoch_loss) * 100
+                    epoch_contributions.append(f"LVNorm/{lv_norm_pct:.0f}%")
+                
+                # Format contributions string
+                epoch_contributions_str = "/".join(epoch_contributions)
+                
+                epoch_postfix = {
+                    'Total': f'{total_epoch_loss:.4f}',
+                    'Contributions': f'{epoch_contributions_str}',
+                    'Time': f'{t_epoch:.1f}s'
+                }
+                
+                epoch_progress.set_postfix(epoch_postfix)
+
                 # Logging
                 if self.log_wandb:
                     opt_param_groups = self.optimizer.state_dict()['param_groups']
@@ -325,7 +489,11 @@ class SirenDecoderTrainer:
                         'epoch': epoch,
                     }
                     for key, val in epoch_losses.items():
-                        log_dict[f'loss/{key}'] = val.detach().item()
+                        # Fix: Only call .detach() if val is a tensor, else just use float value
+                        if hasattr(val, 'detach'):
+                            log_dict[f'loss/{key}'] = val.detach().item()
+                        else:
+                            log_dict[f'loss/{key}'] = float(val)
                     for key, val in epoch_profile_times.items():
                         log_dict[f'prof/{key}'] = np.sum(val)
                     log_dict['prof/epoch'] = t_epoch

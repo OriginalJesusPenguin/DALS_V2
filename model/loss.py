@@ -36,9 +36,13 @@ def mesh_bl_quality_loss(
     # TODO: Maybe weigh contribution by each mesh by number of triangles.
 
     # First, precompute all edge lengths
+    # Get the packed list of all unique edges in the batch of meshes.
     edges = meshes.edges_packed()
+    # Get the packed tensor of all vertices in the batch of meshes.
     verts = meshes.verts_packed()
+    # For each edge, retrieve the coordinates of its two endpoint vertices.
     v0, v1 = verts[edges].unbind(1)
+    # Compute the squared Euclidean length of each edge.
     sqrd_lengths = torch.sum((v0 - v1) ** 2, dim=-1)
 
     # Now, compute the loss components for each triangle
@@ -94,13 +98,35 @@ def mesh_edge_loss_highdim(meshes, vert_features, target_length: float = 0.0):
     return loss.sum() / N
 
 def mesh_laplacian_loss_highdim(meshes, vert_features, p=2):
-    assert p >= 1
+    """
+    Computes a high-dimensional Laplacian loss on vertex features.
+
+    Args:
+        meshes: Meshes object containing the mesh structure.
+        vert_features: (sum(V_n), D) tensor of vertex features.
+        p: The order of the Laplacian (number of times to apply the Laplacian operator).
+
+    Returns:
+        loss: Scalar Laplacian loss value.
+    """
+    assert p >= 1  # Ensure the Laplacian order is at least 1
+
+    # Get the packed Laplacian matrix for all meshes in the batch
     L = meshes.laplacian_packed()
+
+    # Initialize Lx as the vertex features
     Lx = vert_features
+
+    # Apply the Laplacian operator p times
     for i in range(p):
         Lx = L.mm(Lx)
-    loss = torch.sum(vert_features * Lx)
-    #loss = L.mm(vert_features)
-    #loss = torch.sum(loss ** 2)
-    return loss
 
+    # Compute the loss as the sum of the elementwise product of vert_features and Lx
+    # This is equivalent to a quadratic form: sum_i <x_i, (L^p x_i)>
+    loss = torch.sum(vert_features * Lx)
+
+    # Alternative (commented out): sum of squared Laplacian values
+    # loss = L.mm(vert_features)
+    # loss = torch.sum(loss ** 2)
+
+    return loss

@@ -140,31 +140,42 @@ class MLP(nn.Sequential):
 
 
 class MeshOffsetBlockMLP(nn.Module):
+    """
+    MeshOffsetBlockMLP applies a sequence of MLPs to mesh vertex features,
+    concatenating latent vectors at each stage as specified by concat_latent_at.
+    """
     def __init__(self, latent_features, hidden_features=None,
                  vert_in_features=3, vert_out_features=3, norm='n',
                  concat_latent_at=None):
         super().__init__()
 
+        # Ensure normalization type is valid
         assert norm in ['n', 'b', 'l']
+
+        # If concat_latent_at is not provided, default to empty list
         if concat_latent_at is None:
             concat_latent_at = []
+        # feature_runs defines the start and end indices for each MLP block
         feature_runs = [0] + concat_latent_at + [None]
 
+        # If hidden_features is not provided, default to empty list
         if hidden_features is None:
             hidden_features = []
-        features = [vert_in_features] + hidden_features \
-                 + [vert_out_features]
+        # features is the list of layer sizes for the full MLP stack
+        features = [vert_in_features] + hidden_features + [vert_out_features]
 
         mlps = []
+        # For each block, create an MLP with the appropriate input/output sizes
         for b, e in zip(feature_runs[:-1], feature_runs[1:]):
             if e is not None:
-                e += 1
+                e += 1  # include the endpoint in the slice
             f = features[b:e]
+            # Add latent_features to the input dimension for each block
             f[0] += latent_features
             mlps.append(MLP(f, norm=norm))
 
+        # Store the list of MLPs as a ModuleList for proper registration
         self.mlps = nn.ModuleList(mlps)
-
 
     def forward(self, meshes, latent_vectors, vert_features=None,
                 expand_lv=True):
@@ -298,7 +309,7 @@ class MeshDecoderTrainer:
         parser.add_argument('--lr_reduce_factor', type=float, default=0.1)
         parser.add_argument('--lr_reduce_patience', type=int, default=100)
         parser.add_argument('--lr_reduce_min_lr', type=float, default=1e-5)
-        parser.add_argument('--save_shapes_every', type=int, default=1000)
+        parser.add_argument('--save_shapes_every', type=int, default=0)
         parser.add_argument('--save_shapes_dir', type=str, default='./saved_shapes')
 
         # Misc. parameters
@@ -627,23 +638,42 @@ class MeshDecoderTrainer:
                             self._save_shapes(preds, batch, epoch, num_epoch_batches)
                             self.shapes_saved_count = 0
                     
-                    # Update progress bar with weighted loss components
-                    postfix_dict = {
-                        'Total': f'{loss.item():.4f}',
-                        'Chamfer': f'{weighted_losses.get("chamfer", 0.0):.4f}',
-                    }
+                    # Update progress bar with weighted loss components and percentages
+                    total_loss = loss.item()
+                    contributions = []
                     
-                    # Add other weighted loss components (only if active)
-                    if 'normal' in weighted_losses:
-                        postfix_dict['Normal'] = f"{weighted_losses['normal']:.4f}"
+                    # Calculate percentages for active losses
+                    if 'chamfer' in weighted_losses:
+                        chamfer_pct = (weighted_losses['chamfer'] / total_loss) * 100
+                        contributions.append(f"Chamfer/{chamfer_pct:.0f}%")
+                    
                     if 'edge_length' in weighted_losses:
-                        postfix_dict['Edge'] = f"{weighted_losses['edge_length']:.4f}"
+                        edge_pct = (weighted_losses['edge_length'] / total_loss) * 100
+                        contributions.append(f"Edge/{edge_pct:.0f}%")
+                    
                     if 'laplacian' in weighted_losses:
-                        postfix_dict['Laplacian'] = f"{weighted_losses['laplacian']:.4f}"
+                        laplacian_pct = (weighted_losses['laplacian'] / total_loss) * 100
+                        contributions.append(f"Laplacian/{laplacian_pct:.0f}%")
+                    
+                    if 'normal' in weighted_losses:
+                        normal_pct = (weighted_losses['normal'] / total_loss) * 100
+                        contributions.append(f"Normal/{normal_pct:.0f}%")
+                    
                     if 'quality' in weighted_losses:
-                        postfix_dict['Quality'] = f"{weighted_losses['quality']:.4f}"
+                        quality_pct = (weighted_losses['quality'] / total_loss) * 100
+                        contributions.append(f"Quality/{quality_pct:.0f}%")
+                    
                     if 'norm' in weighted_losses:
-                        postfix_dict['Norm'] = f"{weighted_losses['norm']:.4f}"
+                        norm_pct = (weighted_losses['norm'] / total_loss) * 100
+                        contributions.append(f"Norm/{norm_pct:.0f}%")
+                    
+                    # Format contributions string
+                    contributions_str = "/".join(contributions)
+                    
+                    postfix_dict = {
+                        'Total': f'{total_loss:.4f}',
+                        'Contributions': f'{contributions_str}'
+                    }
                     
                     batch_progress.set_postfix(postfix_dict)
 
@@ -717,27 +747,59 @@ class MeshDecoderTrainer:
                     log_dict['prof/epoch'] = t_epoch
                     wandb.log(log_dict)
 
-                # Update epoch progress bar with weighted loss components
-                epoch_postfix = {
-                    'Total': f'{epoch_losses["loss"]:.4f}',
-                    'Chamfer': f'{epoch_losses["chamfer"]:.4f}',
-                }
+                # Update epoch progress bar with weighted loss components and percentages
+                total_epoch_loss = epoch_losses["loss"]
+                epoch_contributions = []
                 
-                # Add weighted loss components for epoch summary (only if active)
+                # Calculate weighted losses for epoch summary
+                weighted_epoch_losses = {}
+                weighted_epoch_losses['chamfer'] = epoch_losses["chamfer"]
+                
                 if self.weight_normal_loss != 0:
-                    epoch_postfix['Normal'] = f'{self.weight_normal_loss * epoch_losses["normal"]:.4f}'
+                    weighted_epoch_losses['normal'] = self.weight_normal_loss * epoch_losses["normal"]
                 if self.weight_edge_loss != 0:
-                    epoch_postfix['Edge'] = f'{self.weight_edge_loss * epoch_losses["edge_length"]:.4f}'
+                    weighted_epoch_losses['edge_length'] = self.weight_edge_loss * epoch_losses["edge_length"]
                 if self.weight_laplacian_loss != 0:
-                    epoch_postfix['Laplacian'] = f'{self.weight_laplacian_loss * epoch_losses["laplacian"]:.4f}'
+                    weighted_epoch_losses['laplacian'] = self.weight_laplacian_loss * epoch_losses["laplacian"]
                 if self.weight_quality_loss != 0:
-                    epoch_postfix['Quality'] = f'{self.weight_quality_loss * epoch_losses["quality"]:.4f}'
+                    weighted_epoch_losses['quality'] = self.weight_quality_loss * epoch_losses["quality"]
                 if self.weight_norm_loss != 0:
                     ramp = min(1.0, epoch / 100.0)
-                    epoch_postfix['Norm'] = f'{self.weight_norm_loss * ramp * epoch_losses["norm"]:.4f}'
+                    weighted_epoch_losses['norm'] = self.weight_norm_loss * ramp * epoch_losses["norm"]
                 
-                # Add timing info
-                epoch_postfix['Time'] = f'{t_epoch:.1f}s'
+                # Calculate percentages for active losses
+                if 'chamfer' in weighted_epoch_losses:
+                    chamfer_pct = (weighted_epoch_losses['chamfer'] / total_epoch_loss) * 100
+                    epoch_contributions.append(f"Chamfer/{chamfer_pct:.0f}%")
+                
+                if 'edge_length' in weighted_epoch_losses:
+                    edge_pct = (weighted_epoch_losses['edge_length'] / total_epoch_loss) * 100
+                    epoch_contributions.append(f"Edge/{edge_pct:.0f}%")
+                
+                if 'laplacian' in weighted_epoch_losses:
+                    laplacian_pct = (weighted_epoch_losses['laplacian'] / total_epoch_loss) * 100
+                    epoch_contributions.append(f"Laplacian/{laplacian_pct:.0f}%")
+                
+                if 'normal' in weighted_epoch_losses:
+                    normal_pct = (weighted_epoch_losses['normal'] / total_epoch_loss) * 100
+                    epoch_contributions.append(f"Normal/{normal_pct:.0f}%")
+                
+                if 'quality' in weighted_epoch_losses:
+                    quality_pct = (weighted_epoch_losses['quality'] / total_epoch_loss) * 100
+                    epoch_contributions.append(f"Quality/{quality_pct:.0f}%")
+                
+                if 'norm' in weighted_epoch_losses:
+                    norm_pct = (weighted_epoch_losses['norm'] / total_epoch_loss) * 100
+                    epoch_contributions.append(f"Norm/{norm_pct:.0f}%")
+                
+                # Format contributions string
+                epoch_contributions_str = "/".join(epoch_contributions)
+                
+                epoch_postfix = {
+                    'Total': f'{total_epoch_loss:.4f}',
+                    'Contributions': f'{epoch_contributions_str}',
+                    'Time': f'{t_epoch:.1f}s'
+                }
                 
                 epoch_progress.set_postfix(epoch_postfix)
                 

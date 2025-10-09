@@ -1,0 +1,1 @@
+Namespace(checkpoint_dir=None, checkpoint_jobid=None, data_path='/home/ralbe/pyhppc_project/cirr_segm_clean/unit_sphere_meshes_subsample', lr=0.001, lv_grid_size=None, max_iters=250, mc_batch_points=524288, num_point_samples=2500, output_dir='.', remesh_at_end=False, sample_mode='uniform', train_test_split_idx=-1, voxel_res=128)

@@ -8,6 +8,7 @@ from glob import glob
 from os.path import join
 import argparse
 
+from tqdm import tqdm
 import numpy as np
 
 import torch
@@ -93,13 +94,19 @@ args = parser.parse_args()
 
 print(args)
 
+# Ensure output directory exists
+os.makedirs(args.output_dir, exist_ok=True)
+
 # Load model checkpoint
 #jobid = 12880693
 #checkpoint_path = f'/work1/patmjen/meshfit/experiments/mesh_decoder/md_{jobid}/trial_0/'
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-checkpoint_path = sorted(glob(join(args.checkpoint_dir, '*MeshDecoder*.ckpt')))[-1]
+# checkpoint_path = sorted(glob(join(args.checkpoint_dir, '*MeshDecoder*.ckpt')))[-1]
+checkpoint_path = '/home/ralbe/DALS/mesh_autodecoder/MeshDecoderTrainer_2025-10-03_15-58.ckpt'
+# checkpoint_path = '/home/ralbe/DALS/mesh_autodecoder/LocalMeshDecoderTrainer_2025-10-03_16-29.ckpt'
 print('Loading checkpoint:',  checkpoint_path)
+
 checkpoint = torch.load(checkpoint_path, map_location=device)
 
 hparams = checkpoint['hparams']
@@ -114,8 +121,7 @@ decoder = MeshDecoder(
 )
 decoder.load_state_dict(checkpoint['decoder_state_dict'])
 decoder.eval()
-# Use CPU instead of CUDA since CUDA is not available
-# decoder.cuda()
+
 
 latent_vectors = checkpoint['latent_vectors']
 latent_vectors.eval()
@@ -128,13 +134,14 @@ template = checkpoint['template']
 #data_path = '/work1/patmjen/meshfit/datasets/shapes/ShapeNetV2/planes/'
 print('Loading data from:', args.data_path)
 meshes = load_meshes_in_dir(args.data_path)
+print('Found', len(meshes), 'meshes')
 
 # Get filenames for each mesh
 import glob
 mesh_filenames = sorted(glob.glob(os.path.join(args.data_path, '*.obj')))
 mesh_filenames = [os.path.basename(fname) for fname in mesh_filenames]  # Get just the filename, not full path
+print('Found', len(mesh_filenames), 'filenames')
 
-device = torch.device('cuda')
 #num_point_samples = 2500
 #max_iters = 250
 #lr = 1e-3
@@ -149,7 +156,6 @@ for r in args.remesh_at:
 cf = 10000
 
 all_metrics = []
-from tqdm import tqdm
 
 all_pred_meshes = []
 all_latent_vectors = []
@@ -228,7 +234,8 @@ if args.latent_mode == 'global':
             if args.remesh_at_end:
                 v0, v1 = pred_mesh.verts_packed()[pred_mesh.edges_packed()].unbind(1)
                 h = torch.norm(v1 - v0, dim=1).mean().cpu()
-                pred_mesh = remesh_bk(pred_mesh, h, 5)
+                # Use keyword args to avoid passing target_length_ratio positionally
+                pred_mesh = remesh_bk(pred_mesh, target_length=h, iters=5)
         t3 = time()
 
         all_pred_meshes.append(pred_mesh.clone().cpu())
@@ -240,7 +247,7 @@ if args.latent_mode == 'global':
         true_point_samples = sample_points_from_meshes(true_mesh, 100000)
         pred_point_samples = sample_points_from_meshes(pred_mesh, 100000)
 
-        metrics = point_metrics(true_point_samples, pred_point_samples, [0.02, 0.04])
+        metrics = point_metrics(true_point_samples, pred_point_samples, [0.01, 0.02])
         metrics[f'ChamferL2 x {cf}'] = chamfer_distance(true_point_samples, pred_point_samples)[0] * cf
         metrics['BL quality'] = 1.0 - mesh_bl_quality_loss(pred_mesh)
         if METRICS_AVAILABLE:
@@ -253,8 +260,8 @@ if args.latent_mode == 'global':
         metrics['Total'] = t3 - t0
 
         all_metrics.append(metrics)
-else:  # args.latent_mode == 'local'
-    from tqdm import tqdm
+elif args.latent_mode == 'local':
+    
     for i, true_mesh in enumerate(tqdm(meshes, desc="Local latent optimization")):
         true_mesh = true_mesh.to(device)
         if args.point_sample_mode == 'uniform':
@@ -382,7 +389,7 @@ else:  # args.latent_mode == 'local'
         true_point_samples = sample_points_from_meshes(true_mesh, 100000)
         pred_point_samples = sample_points_from_meshes(pred_mesh, 100000)
 
-        metrics = point_metrics(true_point_samples, pred_point_samples, [0.02, 0.04])
+        metrics = point_metrics(true_point_samples, pred_point_samples, [0.01, 0.02])
         metrics[f'ChamferL2 x {cf}'] = chamfer_distance(true_point_samples, pred_point_samples)[0] * cf
         metrics['BL quality'] = 1.0 - mesh_bl_quality_loss(pred_mesh)
         if METRICS_AVAILABLE:

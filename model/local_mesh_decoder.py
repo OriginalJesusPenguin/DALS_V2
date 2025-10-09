@@ -566,23 +566,42 @@ class LocalMeshDecoderTrainer:
                     t_accum = time() - t_accum
                     epoch_profile_times['accum'].append(t_accum)
                     
-                    # Update progress bar with weighted loss components
-                    postfix_dict = {
-                        'Total': f'{loss.item():.4f}',
-                        'Chamfer': f'{weighted_losses.get("chamfer", 0.0):.4f}',
-                    }
+                    # Update progress bar with weighted loss components and percentages
+                    total_loss = loss.item()
+                    contributions = []
                     
-                    # Add other weighted loss components (only if active)
-                    if 'normal' in weighted_losses:
-                        postfix_dict['Normal'] = f"{weighted_losses['normal']:.4f}"
+                    # Calculate percentages for active losses
+                    if 'chamfer' in weighted_losses:
+                        chamfer_pct = (weighted_losses['chamfer'] / total_loss) * 100
+                        contributions.append(f"Chamfer/{chamfer_pct:.0f}%")
+                    
                     if 'edge_length' in weighted_losses:
-                        postfix_dict['Edge'] = f"{weighted_losses['edge_length']:.4f}"
+                        edge_pct = (weighted_losses['edge_length'] / total_loss) * 100
+                        contributions.append(f"Edge/{edge_pct:.0f}%")
+                    
                     if 'laplacian' in weighted_losses:
-                        postfix_dict['Laplacian'] = f"{weighted_losses['laplacian']:.4f}"
+                        laplacian_pct = (weighted_losses['laplacian'] / total_loss) * 100
+                        contributions.append(f"Laplacian/{laplacian_pct:.0f}%")
+                    
+                    if 'normal' in weighted_losses:
+                        normal_pct = (weighted_losses['normal'] / total_loss) * 100
+                        contributions.append(f"Normal/{normal_pct:.0f}%")
+                    
                     if 'quality' in weighted_losses:
-                        postfix_dict['Quality'] = f"{weighted_losses['quality']:.4f}"
+                        quality_pct = (weighted_losses['quality'] / total_loss) * 100
+                        contributions.append(f"Quality/{quality_pct:.0f}%")
+                    
                     if 'norm' in weighted_losses:
-                        postfix_dict['Norm'] = f"{weighted_losses['norm']:.4f}"
+                        norm_pct = (weighted_losses['norm'] / total_loss) * 100
+                        contributions.append(f"Norm/{norm_pct:.0f}%")
+                    
+                    # Format contributions string
+                    contributions_str = "/".join(contributions)
+                    
+                    postfix_dict = {
+                        'Total': f'{total_loss:.4f}',
+                        'Contributions': f'{contributions_str}'
+                    }
                     
                     batch_progress.set_postfix(postfix_dict)
 
@@ -618,27 +637,59 @@ class LocalMeshDecoderTrainer:
                 t_epoch = time() - t_epoch
                 self.profile_times['epoch'].append(t_epoch)
 
-                # Update epoch progress bar with weighted loss components
-                epoch_postfix = {
-                    'Total': f'{epoch_losses["loss"]:.4f}',
-                    'Chamfer': f'{epoch_losses["chamfer"]:.4f}',
-                }
+                # Update epoch progress bar with weighted loss components and percentages
+                total_epoch_loss = epoch_losses["loss"]
+                epoch_contributions = []
                 
-                # Add weighted loss components for epoch summary (only if active)
+                # Calculate weighted losses for epoch summary
+                weighted_epoch_losses = {}
+                weighted_epoch_losses['chamfer'] = epoch_losses["chamfer"]
+                
                 if self.weight_normal_loss != 0:
-                    epoch_postfix['Normal'] = f'{self.weight_normal_loss * epoch_losses["normal"]:.4f}'
+                    weighted_epoch_losses['normal'] = self.weight_normal_loss * epoch_losses["normal"]
                 if self.weight_edge_loss != 0:
-                    epoch_postfix['Edge'] = f'{self.weight_edge_loss * epoch_losses["edge_length"]:.4f}'
+                    weighted_epoch_losses['edge_length'] = self.weight_edge_loss * epoch_losses["edge_length"]
                 if self.weight_laplacian_loss != 0:
-                    epoch_postfix['Laplacian'] = f'{self.weight_laplacian_loss * epoch_losses["laplacian"]:.4f}'
+                    weighted_epoch_losses['laplacian'] = self.weight_laplacian_loss * epoch_losses["laplacian"]
                 if self.weight_quality_loss != 0:
-                    epoch_postfix['Quality'] = f'{self.weight_quality_loss * epoch_losses["quality"]:.4f}'
+                    weighted_epoch_losses['quality'] = self.weight_quality_loss * epoch_losses["quality"]
                 if self.weight_norm_loss != 0:
                     ramp = min(1.0, epoch / 100.0)
-                    epoch_postfix['Norm'] = f'{self.weight_norm_loss * ramp * epoch_losses["norm"]:.4f}'
+                    weighted_epoch_losses['norm'] = self.weight_norm_loss * ramp * epoch_losses["norm"]
                 
-                # Add timing info
-                epoch_postfix['Time'] = f'{t_epoch:.1f}s'
+                # Calculate percentages for active losses
+                if 'chamfer' in weighted_epoch_losses:
+                    chamfer_pct = (weighted_epoch_losses['chamfer'] / total_epoch_loss) * 100
+                    epoch_contributions.append(f"Chamfer/{chamfer_pct:.0f}%")
+                
+                if 'edge_length' in weighted_epoch_losses:
+                    edge_pct = (weighted_epoch_losses['edge_length'] / total_epoch_loss) * 100
+                    epoch_contributions.append(f"Edge/{edge_pct:.0f}%")
+                
+                if 'laplacian' in weighted_epoch_losses:
+                    laplacian_pct = (weighted_epoch_losses['laplacian'] / total_epoch_loss) * 100
+                    epoch_contributions.append(f"Laplacian/{laplacian_pct:.0f}%")
+                
+                if 'normal' in weighted_epoch_losses:
+                    normal_pct = (weighted_epoch_losses['normal'] / total_epoch_loss) * 100
+                    epoch_contributions.append(f"Normal/{normal_pct:.0f}%")
+                
+                if 'quality' in weighted_epoch_losses:
+                    quality_pct = (weighted_epoch_losses['quality'] / total_epoch_loss) * 100
+                    epoch_contributions.append(f"Quality/{quality_pct:.0f}%")
+                
+                if 'norm' in weighted_epoch_losses:
+                    norm_pct = (weighted_epoch_losses['norm'] / total_epoch_loss) * 100
+                    epoch_contributions.append(f"Norm/{norm_pct:.0f}%")
+                
+                # Format contributions string
+                epoch_contributions_str = "/".join(epoch_contributions)
+                
+                epoch_postfix = {
+                    'Total': f'{total_epoch_loss:.4f}',
+                    'Contributions': f'{epoch_contributions_str}',
+                    'Time': f'{t_epoch:.1f}s'
+                }
                 
                 epoch_progress.set_postfix(epoch_postfix)
 
@@ -653,7 +704,11 @@ class LocalMeshDecoderTrainer:
                         'epoch': epoch,
                     }
                     for key, val in epoch_losses.items():
-                        log_dict[f'loss/{key}'] = val.detach().item()
+                        # If val is a tensor, detach and convert to item, else just use the float
+                        if hasattr(val, 'detach'):
+                            log_dict[f'loss/{key}'] = val.detach().item()
+                        else:
+                            log_dict[f'loss/{key}'] = float(val)
                     for key, val in epoch_profile_times.items():
                         log_dict[f'prof/{key}'] = np.sum(val)
                     log_dict['prof/epoch'] = t_epoch

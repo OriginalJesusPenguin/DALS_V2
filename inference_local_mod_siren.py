@@ -46,13 +46,18 @@ parser.add_argument('--voxel_res', type=int, default=128)
 parser.add_argument('--train_test_split_idx', type=int, default=0)
 parser.add_argument('--sample_mode', choices=['uniform', 'slice'], default='uniform')
 parser.add_argument('--remesh_at_end', action='store_true')
+parser.add_argument('--lv_grid_size', type=int, default=None)
+parser.add_argument('--mc_batch_points', type=int, default=2*(64**3))
 args = parser.parse_args()
 
 #checkpoint_path = f'/work1/patmjen/meshfit/experiments/siren/si_{jobid}/trial_0/'
 
-checkpoint_path = sorted(glob(join(args.checkpoint_dir, '*.ckpt')))[-1]
+# checkpoint_path = sorted(glob(join(args.checkpoint_dir, '*.ckpt')))[-1]
+# checkpoint_path  = '/home/ralbe/DALS/mesh_autodecoder/LocalModSirenDecoderTrainer_2025-10-03_16-42.ckpt'
+checkpoint_path = '/home/ralbe/DALS/mesh_autodecoder/LocalModSirenDecoderTrainer_2025-10-03_16-44.ckpt'
 print('Loading checkpoint:', checkpoint_path)
-checkpoint = torch.load(checkpoint_path)
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+checkpoint = torch.load(checkpoint_path, map_location=device)
 
 hparams = checkpoint['hparams']
 
@@ -66,11 +71,12 @@ decoder = LocalModSirenDecoder(
 decoder.load_state_dict(checkpoint['decoder_state_dict'])
 decoder = decoder.eval()
 decoder.requires_grad_(False)
-decoder.cuda()
+decoder.to(device)
 
 latent_vectors = checkpoint['latent_vectors']
 latent_vectors = latent_vectors.eval()
 latent_vectors.requires_grad_(False)
+latent_vectors.to(device)
 
 
 @torch.no_grad()
@@ -78,7 +84,7 @@ def decode_to_mesh(decoder, lv, grid_size, thr=0, batch_size=None, loadbar=False
     if lv.ndim == 1:
         lv = lv.unsqueeze(0)
     if batch_size is None:
-        points_device = None
+        points_device = lv.device
         batch_size = grid_size ** 3
     else:
         points_device = lv.device
@@ -92,12 +98,12 @@ def decode_to_mesh(decoder, lv, grid_size, thr=0, batch_size=None, loadbar=False
     t_points = time() - t_points
 
     t_forward = time()
-    sdf = torch.empty(len(points))
+    sdf = torch.empty(len(points), device=device)
     range_fn = trange if loadbar else range
     for ib in range_fn(0, len(points), batch_size):
         ie = min(len(points), ib + batch_size)
         points_d = points[ib:ie].to(device)
-        sdf_batch = decoder(points_d.unsqueeze(0), lv).cpu()
+        sdf_batch = decoder(points_d.unsqueeze(0), lv)
         sdf_batch[points_d.norm(dim=-1) > 1.0] = -1
         sdf[ib:ie] = sdf_batch.squeeze()
 
@@ -106,7 +112,9 @@ def decode_to_mesh(decoder, lv, grid_size, thr=0, batch_size=None, loadbar=False
 
     t_mc = time()
     # mesh = cubify(-sdf, -thr)
-    verts, faces, _, _ = marching_cubes(-sdf.numpy()[0], -thr)
+    sdf_np = -sdf.detach().cpu().numpy()[0]
+    print("marching_cubes: volume data range:", sdf_np.min(), sdf_np.max())
+    verts, faces, _, _ = marching_cubes(sdf_np, -thr)
     if only_largest_cc:
         tmesh = trimesh.Trimesh(verts, faces)
         cc = trimesh.graph.split(tmesh)
@@ -114,8 +122,8 @@ def decode_to_mesh(decoder, lv, grid_size, thr=0, batch_size=None, loadbar=False
         verts = largest_mesh.vertices
         faces = largest_mesh.faces
     mesh = Meshes(
-        torch.from_numpy(verts.copy()[:, [2, 1, 0]]).unsqueeze(0).float(),
-        torch.from_numpy(faces.copy()).unsqueeze(0).float()
+        torch.from_numpy(verts.copy()[:, [2, 1, 0]]).unsqueeze(0).to(device).float(),
+        torch.from_numpy(faces.copy()).unsqueeze(0).to(device).long()
     )
     t_mc = time() - t_mc
 
@@ -131,7 +139,7 @@ def decode_from_pointset_local(eval_decoder, lv0, fit_points, lv_grid_size, max_
     assert lv0.shape[1] % (lv_grid_size ** 3) == 0
     latent_features = lv0.shape[1] // (lv_grid_size ** 3)
     #lv_grid = torch.zeros((1, latent_features) + (lv_grid_size,) * 3, device=lv0.device)
-    lv_grid = lv0.view(1, latent_features, lv_grid_size, lv_grid_size, lv_grid_size).clone()
+    lv_grid = lv0.view(1, latent_features, lv_grid_size, lv_grid_size, lv_grid_size).clone().to(lv0.device)
     lv_grid.requires_grad = True
 
     optimizer = torch.optim.Adam([lv_grid], lr=lr)
@@ -143,7 +151,7 @@ def decode_from_pointset_local(eval_decoder, lv0, fit_points, lv_grid_size, max_
     losses = []
     for i in trange(max_iter) if loadbar else range(max_iter):
 
-        pred_sdf = eval_decoder(lv_grid, fit_points.unsqueeze(0))
+        pred_sdf = eval_decoder(lv_grid, fit_points.to(lv_grid.device).unsqueeze(0))
 
         loss = torch.abs(pred_sdf).mean()
 
@@ -188,9 +196,9 @@ all_val_meshes = []
 all_val_metrics = []
 for i, true_mesh in enumerate(val_data):
     print(f'{i}')
-    true_mesh = true_mesh.cuda()
+    true_mesh = true_mesh.to(device)
     if args.sample_mode == 'uniform':
-        fit_points = sample_points_from_meshes(true_mesh, args.num_point_samples).cuda()[0]
+        fit_points = sample_points_from_meshes(true_mesh, args.num_point_samples).to(device)[0]
     elif args.sample_mode == 'slice':
         plane_normals = torch.eye(3, device=true_mesh.device)
         plane_dists = torch.zeros(3, device=true_mesh.device) + 0.1
@@ -208,7 +216,7 @@ for i, true_mesh in enumerate(val_data):
         eval_decoder,
         lv0,
         fit_points,
-        hparams['lv_grid_size'],
+        (args.lv_grid_size if args.lv_grid_size is not None else hparams['lv_grid_size']),
         max_iter=args.max_iters,
         lr=args.lr,
         lr_step=100
@@ -219,20 +227,20 @@ for i, true_mesh in enumerate(val_data):
         lv,
         args.voxel_res,
         thr=0.0,
-        batch_size=128**3,
+        batch_size=min(args.mc_batch_points, args.voxel_res**3),
         only_largest_cc=True
     )
     t2 = time()
 
 
     pred_mesh.scale_verts_(2/args.voxel_res)
-    pred_mesh.offset_verts_(torch.tensor([-1, -1, -1]))
+    pred_mesh.offset_verts_(torch.tensor([-1, -1, -1], device=pred_mesh.device))
 
     if args.remesh_at_end:
         pred_mesh = remesh_bk(pred_mesh)
 
     all_val_meshes.append(pred_mesh.detach().cpu().clone())
-    metrics = eval_reconstruction(pred_mesh.cuda(), true_mesh.cuda(), 100000)
+    metrics = eval_reconstruction(pred_mesh.to(device), true_mesh.to(device), 100000)
     metrics['BL quality'] = 1.0 - mesh_bl_quality_loss(pred_mesh)
     metrics['TimeOptim'] = t1 - t0
     metrics['TimeMC'] = t2 - t1
@@ -259,9 +267,9 @@ all_train_metrics = []
 all_train_meshes = []
 for i, true_mesh in enumerate(train_data):
     print(f'{i}')
-    true_mesh = true_mesh.cuda()
+    true_mesh = true_mesh.to(device)
     if args.sample_mode == 'uniform':
-        fit_points = sample_points_from_meshes(true_mesh, args.num_point_samples).cuda()[0]
+        fit_points = sample_points_from_meshes(true_mesh, args.num_point_samples).to(device)[0]
     elif args.sample_mode == 'slice':
         plane_normals = torch.eye(3, device=true_mesh.device)
         plane_dists = torch.zeros(3, device=true_mesh.device) + 0.1
@@ -279,7 +287,7 @@ for i, true_mesh in enumerate(train_data):
         eval_decoder,
         lv0,
         fit_points,
-        hparams['lv_grid_size'],
+        (args.lv_grid_size if args.lv_grid_size is not None else hparams['lv_grid_size']),
         max_iter=args.max_iters,
         lr=args.lr,
         lr_step=100
@@ -290,20 +298,20 @@ for i, true_mesh in enumerate(train_data):
         lv,
         args.voxel_res,
         thr=0.0,
-        batch_size=2*128**3,
+        batch_size=min(args.mc_batch_points, args.voxel_res**3),
         only_largest_cc=True
     )
     t2 = time()
 
 
     pred_mesh.scale_verts_(2/args.voxel_res)
-    pred_mesh.offset_verts_(torch.tensor([-1, -1, -1]))
+    pred_mesh.offset_verts_(torch.tensor([-1, -1, -1], device=pred_mesh.device))
 
     if args.remesh_at_end:
         pred_mesh = remesh_bk(pred_mesh)
 
     all_train_meshes.append(pred_mesh.detach().cpu().clone())
-    metrics = eval_reconstruction(pred_mesh.cuda(), true_mesh.cuda(), 100000)
+    metrics = eval_reconstruction(pred_mesh.to(device), true_mesh.to(device), 100000)
     metrics['BL quality'] = 1.0 - mesh_bl_quality_loss(pred_mesh)
     metrics['TimeOptim'] = t1 - t0
     metrics['TimeMC'] = t2 - t1
