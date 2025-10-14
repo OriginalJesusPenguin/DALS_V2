@@ -15,6 +15,7 @@ from monai.networks.nets import (
     VNet,
     DynUNet,
     UNETR,
+    SegResNet,
 )
 from monai.data import (
     CacheDataset,
@@ -36,6 +37,88 @@ from monai.transforms import (
 import wandb
 
 from util import seed_everything
+
+
+class SynVNet_8h2s(nn.Module):
+    def __init__(self, n_channels=1, n_classes=2, n_filters=16, normalization='batchnorm', has_dropout=True):
+        super(SynVNet_8h2s, self).__init__()
+        self.n_channels = n_channels
+        self.n_classes = n_classes
+        self.n_filters = n_filters
+        self.normalization = normalization
+        self.has_dropout = has_dropout
+
+        # Encoder
+        self.enc1 = self._make_encoder_block(n_channels, n_filters, normalization)
+        self.enc2 = self._make_encoder_block(n_filters, n_filters*2, normalization)
+        self.enc3 = self._make_encoder_block(n_filters*2, n_filters*4, normalization)
+        self.enc4 = self._make_encoder_block(n_filters*4, n_filters*8, normalization)
+
+        # Decoder
+        self.dec4 = self._make_decoder_block(n_filters*8, n_filters*4, normalization)
+        self.dec3 = self._make_decoder_block(n_filters*4, n_filters*2, normalization)
+        self.dec2 = self._make_decoder_block(n_filters*2, n_filters, normalization)
+        self.dec1 = self._make_decoder_block(n_filters, n_filters, normalization)
+
+        # Final convolution
+        self.final = nn.Conv3d(n_filters, n_classes, kernel_size=1)
+
+        # Dropout
+        self.dropout = nn.Dropout3d(0.5) if has_dropout else None
+
+    def _make_encoder_block(self, in_channels, out_channels, normalization):
+        layers = []
+        layers.append(nn.Conv3d(in_channels, out_channels, kernel_size=3, padding=1))
+        if normalization == 'batchnorm':
+            layers.append(nn.BatchNorm3d(out_channels))
+        layers.append(nn.ReLU(inplace=True))
+        layers.append(nn.Conv3d(out_channels, out_channels, kernel_size=3, padding=1))
+        if normalization == 'batchnorm':
+            layers.append(nn.BatchNorm3d(out_channels))
+        layers.append(nn.ReLU(inplace=True))
+        layers.append(nn.MaxPool3d(kernel_size=2, stride=2))
+        return nn.Sequential(*layers)
+
+    def _make_decoder_block(self, in_channels, out_channels, normalization):
+        layers = []
+        layers.append(nn.ConvTranspose3d(in_channels, out_channels, kernel_size=2, stride=2))
+        layers.append(nn.Conv3d(out_channels, out_channels, kernel_size=3, padding=1))
+        if normalization == 'batchnorm':
+            layers.append(nn.BatchNorm3d(out_channels))
+        layers.append(nn.ReLU(inplace=True))
+        layers.append(nn.Conv3d(out_channels, out_channels, kernel_size=3, padding=1))
+        if normalization == 'batchnorm':
+            layers.append(nn.BatchNorm3d(out_channels))
+        layers.append(nn.ReLU(inplace=True))
+        return nn.Sequential(*layers)
+
+    def forward(self, x):
+        # Encoder path
+        enc1 = self.enc1(x)
+        if self.dropout:
+            enc1 = self.dropout(enc1)
+        
+        enc2 = self.enc2(enc1)
+        if self.dropout:
+            enc2 = self.dropout(enc2)
+        
+        enc3 = self.enc3(enc2)
+        if self.dropout:
+            enc3 = self.dropout(enc3)
+        
+        enc4 = self.enc4(enc3)
+        if self.dropout:
+            enc4 = self.dropout(enc4)
+
+        # Decoder path
+        dec4 = self.dec4(enc4)
+        dec3 = self.dec3(dec4 + enc3)
+        dec2 = self.dec2(dec3 + enc2)
+        dec1 = self.dec1(dec2 + enc1)
+
+        # Final convolution
+        out = self.final(dec1)
+        return out
 
 
 def compute_dice_score(pred, target, threshold=0.5):
@@ -100,7 +183,8 @@ class ConvNetTrainer:
 
         # Model parameters
         parser.add_argument('--model', default='ResUNet',
-                            choices=['ResUNet', 'VNet', 'DynUNet', 'UNETR'])
+                            choices=['ResUNet', 'VNet', 'DynUNet', 'UNETR', 
+                                   'UNET', 'SYNVNET3D', 'SEGRESNET'])
         # TODO: Find better to take sizes as arguments that checks the input
         parser.add_argument('--data_size', type=int, nargs='+',
                             default=[192, 192, 192])
@@ -188,6 +272,28 @@ class ConvNetTrainer:
                 res_block=True,
                 dropout_rate=0.0,
             )
+        elif self.model == 'UNET':
+            self.model = UNet(
+                spatial_dims=3,
+                in_channels=1,
+                out_channels=2,
+                channels=(16, 32, 64, 128, 256),
+                strides=(2, 2, 2, 2),
+            )
+        elif self.model == 'SYNVNET3D':
+            self.model = SynVNet_8h2s(
+                n_channels=1,
+                n_classes=2,
+                n_filters=16,
+                normalization='batchnorm',
+                has_dropout=True,
+            )
+        elif self.model == 'SEGRESNET':
+            self.model = SegResNet(
+                spatial_dims=3,
+                in_channels=1,
+                out_channels=2,
+            )
         if device is None:
             device = torch.device('cpu')
         else:
@@ -268,7 +374,7 @@ class ConvNetTrainer:
             KeepLargestConnectedComponent(1)
         ])
         dice_metric = DiceMetric(
-            include_background=True,
+            include_background=True, ### THIS WAS TRUE BEFORE
             reduction="mean",
             get_not_nans=False,
         )

@@ -10,6 +10,7 @@ import torch
 import numpy as np
 import pandas as pd
 # from prepare_cirrhotic_data import load_nifti_volume
+import nibabel as nib
 from sklearn.model_selection import train_test_split
 import gc
 from tqdm import tqdm
@@ -29,7 +30,7 @@ def create_full_dataset(target_size=(192, 192, 192)):
     healthy_csv = '/home/ralbe/pyhppc_project/cirr_segm_clean/cirrhotic_liver_segmentation/cirr_mri_600/data/healthy_dataset.csv'
     
     print("Creating mixed dataset...")
-    print("New split: ALL healthy -> TRAIN, ALL cirrhotic -> VALIDATION")
+    print("New split: ALL healthy -> TRAIN, Cirrhotic 50/50 -> VALIDATION/TEST")
     
     # Load CSV files
     cirrhotic_df = pd.read_csv(cirrhotic_csv)
@@ -70,15 +71,14 @@ def create_full_dataset(target_size=(192, 192, 192)):
     # cirrhotic_groups = get_cirrhotic_data_by_group(cirrhotic_df)
     # healthy_groups = create_healthy_splits(healthy_df)
     
-    # New behavior: ALL healthy -> TRAIN, cirrhotic split 50/50 between VALIDATION and TEST
+    # New behavior: ALL healthy -> TRAIN, Cirrhotic 50/50 -> VALIDATION/TEST
     # Split cirrhotic data 50/50 between validation and test
-    cirrhotic_train_df, cirrhotic_temp_df = train_test_split(cirrhotic_df, train_size=0.0, test_size=1.0, random_state=42)
-    cirrhotic_valid_df, cirrhotic_test_df = train_test_split(cirrhotic_temp_df, train_size=0.5, test_size=0.5, random_state=42)
+    cirrhotic_valid, cirrhotic_test = train_test_split(cirrhotic_df, train_size=0.5, random_state=42)
     
     cirrhotic_groups = {
-        'train': cirrhotic_train_df,
-        'valid': cirrhotic_valid_df,
-        'test': cirrhotic_test_df,
+        'train': cirrhotic_df.iloc[0:0],
+        'valid': cirrhotic_valid,
+        'test': cirrhotic_test,
     }
     healthy_groups = {
         'train': healthy_df,
@@ -86,7 +86,7 @@ def create_full_dataset(target_size=(192, 192, 192)):
         'test': healthy_df.iloc[0:0],
     }
     
-    # Use all cirrhotic data as validation and all healthy as training
+    # Use all healthy data as training, cirrhotic data split 50/50 between validation and test
     print(f"\nDataset composition:")
     print(f"Cirrhotic train: {len(cirrhotic_groups['train'])} samples")
     print(f"Cirrhotic valid: {len(cirrhotic_groups['valid'])} samples") 
@@ -175,9 +175,9 @@ def create_full_dataset(target_size=(192, 192, 192)):
             for patient in tqdm(batch_patients, desc=f"Processing {data_type} batch {i//batch_size + 1}/{(len(valid_patients)-1)//batch_size + 1}", leave=False):
                 try:
                     # Load volumes
-                    image = load_nifti_volume(patient['T1_img'], target_size)
-                    label = load_nifti_volume(patient['T1_mask'], target_size)
-                    mask = load_nifti_volume(patient['T1_mask_AttentionUNet'], target_size)
+                    image = nib.load(patient['T1_img']).get_fdata().astype(np.float32)
+                    label = nib.load(patient['T1_mask']).get_fdata().astype(np.float32)
+                    mask = nib.load(patient['T1_mask_AttentionUNet']).get_fdata().astype(np.float32)
                     
                     if image is None or label is None or mask is None:
                         print(f"Warning: Failed to load data for {data_type} patient {patient['Patient ID']}")
@@ -477,7 +477,7 @@ def create_full_dataset(target_size=(192, 192, 192)):
     print(f"Mixed dataset created successfully!")
     print(f"Training samples: {train_data['images'].shape[0]}")
     print(f"Validation samples: {val_data['images'].shape[0]}")
-    print(f"Test samples: {test_data['images'].shape[0]}")
+    print(f"Test samples: {test_data['images'].shape[0] if test_data is not None else 0}")
     print(f"Volume shape: {train_data['images'].shape[1:]}")
     
     # Print some statistics
@@ -496,7 +496,7 @@ def create_full_dataset(target_size=(192, 192, 192)):
     print(f"\nFinal distribution:")
     print(f"Train: {cirrhotic_train_available} cirrhotic + {healthy_train_available} healthy = {train_data['images'].shape[0]} total")
     print(f"Valid: {cirrhotic_valid_available} cirrhotic + {healthy_valid_available} healthy = {val_data['images'].shape[0]} total")
-    print(f"Test: {cirrhotic_test_available} cirrhotic + {healthy_test_available} healthy = {test_data['images'].shape[0]} total")
+    print(f"Test: {cirrhotic_test_available} cirrhotic + {healthy_test_available} healthy = {test_data['images'].shape[0] if test_data is not None else 0} total")
     
     print("\nData preparation completed successfully!")
     print("You can now run train_segment.py with:")
