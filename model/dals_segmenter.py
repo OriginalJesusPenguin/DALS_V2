@@ -103,15 +103,15 @@ class ConvNetTrainer:
                             choices=['ResUNet', 'VNet', 'DynUNet', 'UNETR'])
         # TODO: Find better to take sizes as arguments that checks the input
         parser.add_argument('--data_size', type=int, nargs='+',
-                            default=[256, 256, 256])
+                            default=[192, 192, 192])
         parser.add_argument('--data_spacing', type=float, nargs='+',
-                            default=[1.0, 1.0, 1.0])
+                            default=[2.0, 2.0, 2.0])
 
         # Training parameters
         parser.add_argument('--num_epochs', type=int, default=99999)
         parser.add_argument('--batch_size', type=int, default=8)
         parser.add_argument('--learning_rate', type=float, default=1e-3)
-        parser.add_argument('--eval_every', type=int, default=10)
+        parser.add_argument('--eval_every', type=int, default=1)
 
         # Misc. parameters
         parser.add_argument('--no_checkpoints', action='store_true')
@@ -277,7 +277,8 @@ class ConvNetTrainer:
             self.model.parameters(),
             lr=self.learning_rate,
         )
-        scaler = torch.cuda.amp.GradScaler() if self.device.type == 'cuda' else None
+        # Remove GradScaler to avoid AMP-related issues
+        scaler = None
 
         self.best_metric = -np.inf
         self.best_epoch = -1
@@ -301,15 +302,11 @@ class ConvNetTrainer:
                             batch[key] = batch[key].to(self.device)
 
                     self.optimizer.zero_grad()
-                    if scaler is not None:
-                        with torch.cuda.amp.autocast():
-                            t_forward = time()
-                            pred = self.model(batch['images'])
-                            profile_times['forward'] += time() - t_forward
-                    else:
-                        t_forward = time()
-                        pred = self.model(batch['images'])
-                        profile_times['forward'] += time() - t_forward
+                    
+                    # Direct forward pass without AMP
+                    t_forward = time()
+                    pred = self.model(batch['images'])
+                    profile_times['forward'] += time() - t_forward
 
                     t_loss = time()
                     if slice_annot:
@@ -323,15 +320,10 @@ class ConvNetTrainer:
                         loss = loss_function(pred, batch['labels'])
                     profile_times['loss'] += time() - t_loss
 
+                    # Direct gradient update without AMP
                     t_optim = time()
-                    if scaler is not None:
-                        scaler.scale(loss).backward()
-                        scaler.step(self.optimizer)
-                        scaler.update()
-                    else:
-                        loss.backward()
-                        self.optimizer.step()
-                        self.optimizer.zero_grad()
+                    loss.backward()
+                    self.optimizer.step()
                     profile_times['optim'] += time() - t_optim
 
                     losses['loss'] += loss.item()
@@ -362,8 +354,8 @@ class ConvNetTrainer:
                                 if isinstance(batch[key], torch.Tensor):
                                     batch[key] = batch[key].to(self.device)
                             image, label = batch['images'], batch['labels']
-                            with torch.cuda.amp.autocast():
-                                pred = self.model(image)
+                            # Direct forward pass without AMP
+                            pred = self.model(image)
 
                             pred = [post_pred(i)
                                     for i in decollate_batch(pred)]
@@ -385,7 +377,7 @@ class ConvNetTrainer:
                                 self.save_checkpoint(epoch)
 
                     profile_times['validation'] = time() - t_val
-                    print(f"Validation loss: {metric:.6g}, "
+                    print(f"Validation Dice: {metric:.6g}, "
                           f"{profile_times['validation']:.4f} seconds")
 
 
@@ -398,8 +390,8 @@ class ConvNetTrainer:
                     log_dict['Dice/Train'] = avg_dice
                     wandb.log(log_dict)
 
-                print(f"Loss: {losses['loss']:.6g}, "
-                      f"Dice: {avg_dice:.4f}, "
+                print(f"Training Loss: {losses['loss']:.6g}, "
+                      f"Training Dice: {avg_dice:.4f}, "
                       f"{profile_times['epoch']:.4f} seconds")
 
         except KeyboardInterrupt:

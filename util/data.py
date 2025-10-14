@@ -71,7 +71,7 @@ def split_dict_data(
 
 def load_meshes_in_dir(
     path: Union[str, bytes, os.PathLike],
-    loadbar: bool = False,
+    loadbar: bool = True,
 ) -> List[Meshes]:
     """
     Load all meshes in directory
@@ -85,13 +85,14 @@ def load_meshes_in_dir(
     """
     mesh_fnames = sorted(os.listdir(path))
     mesh_fnames = [os.path.join(path, fname) for fname in mesh_fnames]
-
-    return load_meshes(mesh_fnames, loadbar=loadbar)
+    print('About to load: ',len(mesh_fnames), 'meshes')
+    meshes = load_meshes(mesh_fnames, loadbar=loadbar)
+    return meshes
 
 
 def load_meshes(
     fnames: Sequence[Union[str, bytes, os.PathLike]],
-    loadbar: bool = False
+    loadbar: bool = True
 ) -> List[Meshes]:
     """
     Load meshes given by sequence of file names
@@ -106,7 +107,7 @@ def load_meshes(
     meshes = []
     io = pytorch3d.io.IO()
     if loadbar:
-        fnames = tqdm(fnames)
+        fnames = tqdm(fnames, desc="Loading meshes:")
     for fname in fnames:
         meshes.append(io.load_mesh(fname, include_textures=False))
 

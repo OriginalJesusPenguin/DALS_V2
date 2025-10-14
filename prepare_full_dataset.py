@@ -13,6 +13,7 @@ from prepare_cirrhotic_data import load_nifti_volume
 from sklearn.model_selection import train_test_split
 import gc
 from tqdm import tqdm
+import glob
 
 def create_full_dataset(target_size=(192, 192, 192)):
     """
@@ -93,6 +94,7 @@ def create_full_dataset(target_size=(192, 192, 192)):
             img_path = row['T1_img']
             gt_path = row['T1_mask']
             pred_path = row['T1_mask_AttentionUNet']
+            filename = row['Patient ID']
             
             if (pd.isna(img_path) or not os.path.exists(img_path) or
                 pd.isna(gt_path) or not os.path.exists(gt_path) or
@@ -139,6 +141,9 @@ def create_full_dataset(target_size=(192, 192, 192)):
         all_images = []
         all_labels = []
         all_masks = []
+        all_patient_ids = []
+        all_ages = []
+        all_disease_severities = []
         temp_file_count = 0
         
         # Process in batches and save incrementally
@@ -147,6 +152,9 @@ def create_full_dataset(target_size=(192, 192, 192)):
             batch_images = []
             batch_labels = []
             batch_masks = []
+            batch_patient_ids = []
+            batch_ages = []
+            batch_disease_severities = []
             
             for patient in tqdm(batch_patients, desc=f"Processing {data_type} batch {i//batch_size + 1}/{(len(valid_patients)-1)//batch_size + 1}", leave=False):
                 try:
@@ -164,9 +172,22 @@ def create_full_dataset(target_size=(192, 192, 192)):
                     label = torch.from_numpy(label).float()
                     mask = torch.from_numpy(mask).float()
                     
+                    # Extract metadata
+                    patient_id = patient['Patient ID']
+                    age = patient['Age'] if 'Age' in patient else 0
+                    
+                    # Determine disease severity
+                    if data_type == 'healthy':
+                        disease_severity = 0
+                    else:  # cirrhotic
+                        disease_severity = patient['Radiological Evaluation'] if 'Radiological Evaluation' in patient else 0
+                    
                     batch_images.append(image)
                     batch_labels.append(label)
                     batch_masks.append(mask)
+                    batch_patient_ids.append(patient_id)
+                    batch_ages.append(age)
+                    batch_disease_severities.append(disease_severity)
                     
                 except Exception as e:
                     print(f"Error processing {data_type} patient {patient['Patient ID']}: {e}")
@@ -176,9 +197,12 @@ def create_full_dataset(target_size=(192, 192, 192)):
             all_images.extend(batch_images)
             all_labels.extend(batch_labels)
             all_masks.extend(batch_masks)
+            all_patient_ids.extend(batch_patient_ids)
+            all_ages.extend(batch_ages)
+            all_disease_severities.extend(batch_disease_severities)
         
         # Clear batch data from memory
-            del batch_images, batch_labels, batch_masks
+            del batch_images, batch_labels, batch_masks, batch_patient_ids, batch_ages, batch_disease_severities
             gc.collect()
             
             # Save incrementally every 20 samples to avoid memory buildup
@@ -187,7 +211,10 @@ def create_full_dataset(target_size=(192, 192, 192)):
                 temp_data = {
                     'images': torch.stack(all_images),
                     'labels': torch.stack(all_labels),
-                    'masks': torch.stack(all_masks)
+                    'masks': torch.stack(all_masks),
+                    'patient_ids': all_patient_ids,
+                    'ages': all_ages,
+                    'disease_severities': all_disease_severities
                 }
                 
                 # Save to unique temporary file
@@ -196,13 +223,16 @@ def create_full_dataset(target_size=(192, 192, 192)):
                 temp_file_count += 1
                 
                 # Clear memory
-                del temp_data, all_images, all_labels, all_masks
+                del temp_data, all_images, all_labels, all_masks, all_patient_ids, all_ages, all_disease_severities
                 gc.collect()
                 
                 # Reinitialize lists
                 all_images = []
                 all_labels = []
                 all_masks = []
+                all_patient_ids = []
+                all_ages = []
+                all_disease_severities = []
         
         # Save any remaining data
         if len(all_images) > 0:
@@ -210,12 +240,15 @@ def create_full_dataset(target_size=(192, 192, 192)):
             temp_data = {
                 'images': torch.stack(all_images),
                 'labels': torch.stack(all_labels),
-                'masks': torch.stack(all_masks)
+                'masks': torch.stack(all_masks),
+                'patient_ids': all_patient_ids,
+                'ages': all_ages,
+                'disease_severities': all_disease_severities
             }
             temp_path = output_path.replace('.pt', f'_temp_{temp_file_count}.pt')
             torch.save(temp_data, temp_path)
             temp_file_count += 1
-            del temp_data, all_images, all_labels, all_masks
+            del temp_data, all_images, all_labels, all_masks, all_patient_ids, all_ages, all_disease_severities
         gc.collect()
         
         # Return list of all temp files created
@@ -258,6 +291,11 @@ def create_full_dataset(target_size=(192, 192, 192)):
         final_labels = torch.zeros((total_samples,) + sample_shape, dtype=torch.float32)
         final_masks = torch.zeros((total_samples,) + sample_shape, dtype=torch.float32)
         
+        # Initialize metadata lists
+        final_patient_ids = []
+        final_ages = []
+        final_disease_severities = []
+        
         # Fill tensors incrementally
         current_idx = 0
         for temp_file in tqdm(temp_files, desc="Loading temp files"):
@@ -270,6 +308,11 @@ def create_full_dataset(target_size=(192, 192, 192)):
                 final_labels[current_idx:current_idx + batch_size] = temp_data['labels']
                 final_masks[current_idx:current_idx + batch_size] = temp_data['masks']
                 
+                # Copy metadata
+                final_patient_ids.extend(temp_data['patient_ids'])
+                final_ages.extend(temp_data['ages'])
+                final_disease_severities.extend(temp_data['disease_severities'])
+                
                 current_idx += batch_size
                 
                 # Clear temp data
@@ -280,7 +323,10 @@ def create_full_dataset(target_size=(192, 192, 192)):
         final_data = {
             'images': final_images,
             'labels': final_labels,
-            'masks': final_masks
+            'masks': final_masks,
+            'patient_ids': final_patient_ids,
+            'ages': final_ages,
+            'disease_severities': final_disease_severities
         }
         
         # Save final data
@@ -297,9 +343,46 @@ def create_full_dataset(target_size=(192, 192, 192)):
         return final_data
     
     # Create output paths
-    os.makedirs('./data', exist_ok=True)
-    train_path = f'./data/train_data_mixed.pt'
-    val_path = f'./data/val_data_mixed.pt'
+    output_dir = '/scratch/ralbe/dals_data'
+    os.makedirs(output_dir, exist_ok=True)
+    train_path = f'{output_dir}/train_data_mixed.pt'
+    val_path = f'{output_dir}/val_data_mixed.pt'
+    test_path = train_path.replace('train', 'test')
+
+    # Check for existing outputs and prompt user
+    existing_files = [p for p in [train_path, val_path, test_path] if os.path.exists(p)]
+    if len(existing_files) > 0:
+        print("Detected existing dataset files:")
+        for p in existing_files:
+            print(f" - {p}")
+        resp = input("Delete existing files and recompute the data? [y/N]: ").strip().lower()
+        if resp != 'y':
+            print("Aborting without recomputation.")
+            return
+        # Delete existing final and temp files
+        delete_patterns = [
+            train_path,
+            val_path,
+            test_path,
+            train_path.replace('.pt', '_temp_*.pt'),
+            val_path.replace('.pt', '_temp_*.pt'),
+            test_path.replace('.pt', '_temp_*.pt'),
+            train_path.replace('.pt', '_cirrhotic_temp.pt'),
+            train_path.replace('.pt', '_healthy_temp.pt'),
+            val_path.replace('.pt', '_cirrhotic_temp.pt'),
+            val_path.replace('.pt', '_healthy_temp.pt'),
+            test_path.replace('.pt', '_cirrhotic_temp.pt'),
+            test_path.replace('.pt', '_healthy_temp.pt'),
+        ]
+        for pattern in delete_patterns:
+            # If it's a concrete path, glob will still work
+            for fp in glob.glob(pattern):
+                if os.path.exists(fp):
+                    try:
+                        os.remove(fp)
+                        print(f"Deleted: {fp}")
+                    except Exception as e:
+                        print(f"Warning: failed to delete {fp}: {e}")
     
     # Process training data
     print("\n" + "="*50)
@@ -373,7 +456,6 @@ def create_full_dataset(target_size=(192, 192, 192)):
         test_temp_files.extend(healthy_temp_files)
     
     # Combine test data
-    test_path = train_path.replace('train', 'test')
     test_data = combine_temp_files(test_temp_files, test_path)
     
     print(f"Mixed dataset created successfully!")
@@ -387,6 +469,13 @@ def create_full_dataset(target_size=(192, 192, 192)):
     print(f"Image range: [{train_data['images'].min():.3f}, {train_data['images'].max():.3f}]")
     print(f"GT mask range: [{train_data['labels'].min():.3f}, {train_data['labels'].max():.3f}]")
     print(f"Pred mask range: [{train_data['masks'].min():.3f}, {train_data['masks'].max():.3f}]")
+    
+    # Print metadata statistics
+    print(f"\nMetadata statistics:")
+    print(f"Age range: [{min(train_data['ages']):.1f}, {max(train_data['ages']):.1f}]")
+    print(f"Disease severity range: [{min(train_data['disease_severities']):.1f}, {max(train_data['disease_severities']):.1f}]")
+    print(f"Healthy samples (severity=0): {sum(1 for s in train_data['disease_severities'] if s == 0)}")
+    print(f"Cirrhotic samples (severity>0): {sum(1 for s in train_data['disease_severities'] if s > 0)}")
     
     print(f"\nFinal distribution:")
     print(f"Train: {cirrhotic_train_available} cirrhotic + {healthy_train_available} healthy = {train_data['images'].shape[0]} total")

@@ -318,6 +318,7 @@ class MeshDecoderTrainer:
         parser.add_argument('--checkpoint_dir', type=str, default='.')
         parser.add_argument('--random_seed', type=int, default=1337)
         parser.add_argument('--resume_from')
+        parser.add_argument('--profiling', type=bool, default=False)
 
         return parent_parser
 
@@ -518,7 +519,8 @@ class MeshDecoderTrainer:
         if self.resume_from is None:
             print('Starting training')
             self.train_start_time = datetime.datetime.now()
-            self.profile_times = defaultdict(list)
+            if self.profiling:
+                self.profile_times = defaultdict(list)
             self.best_loss = np.inf
             self.best_epoch = -1
             self.best_epoch_losses = defaultdict(float)
@@ -537,7 +539,8 @@ class MeshDecoderTrainer:
             
             for epoch in epoch_progress:
                 epoch_progress.set_description(f'Epoch {epoch + 1}/{self.num_epochs}')
-                epoch_profile_times = defaultdict(list)
+                if self.profiling:
+                    epoch_profile_times = defaultdict(list)
                 epoch_losses = defaultdict(float)
                 num_epoch_batches = 0
                 t_epoch = time()
@@ -552,23 +555,28 @@ class MeshDecoderTrainer:
                     num_epoch_batches += 1
 
                     # Prepare batch
-                    t_batch = time()
+                    if self.profiling:
+                        t_batch = time()
                     batch = self.prepare_batch(batch_idxs)
-                    t_batch = time() - t_batch
-                    epoch_profile_times['batch'].append(t_batch)
+                    if self.profiling:
+                        t_batch = time() - t_batch
+                        epoch_profile_times['batch'].append(t_batch)
 
                     # Forward
-                    t_forward = time()
+                    if self.profiling:
+                        t_forward = time()
                     preds = self.decoder(
                         batch['templates'],
                         batch['latent_vectors'],
                         template_vert_features=batch['template_encodings'],
                     )
-                    t_forward = time() - t_forward
-                    epoch_profile_times['forward'].append(t_forward)
+                    if self.profiling:
+                        t_forward = time() - t_forward
+                        epoch_profile_times['forward'].append(t_forward)
 
                     # Loss
-                    t_loss = time()
+                    if self.profiling:
+                        t_loss = time()
                     losses = self.compute_losses(preds, batch)
                     ramp = min(1.0, epoch / 100.0)
                     
@@ -612,24 +620,34 @@ class MeshDecoderTrainer:
                         weighted_losses['norm'] = weighted_norm.item()
 
                     loss = loss.mean()
-                    t_loss = time() - t_loss
-                    epoch_profile_times['loss'].append(t_loss)
+                    if self.profiling:
+                        t_loss = time() - t_loss
+                        epoch_profile_times['loss'].append(t_loss)
 
                     # Update weights
-                    t_optim = time()
+                    if self.profiling:
+                        t_optim = time()
                     self.optimizer.zero_grad()
                     loss.backward()
                     self.optimizer.step()
-                    t_optim = time() - t_optim
-                    epoch_profile_times['optim'].append(t_optim)
+                    if self.profiling:
+                        t_optim = time() - t_optim
+                        epoch_profile_times['optim'].append(t_optim)
 
                     # Accumulate losses
-                    t_accum = time()
-                    epoch_losses['loss'] += loss
+                    if self.profiling:
+                        t_accum = time()
+                    epoch_losses['loss'] += loss.item()
                     for name, loss_val in losses.items():
-                        epoch_losses[name] += loss_val.mean()
-                    t_accum = time() - t_accum
-                    epoch_profile_times['accum'].append(t_accum)
+                        epoch_losses[name] += loss_val.mean().item()
+                    if self.profiling:
+                        t_accum = time() - t_accum
+                        epoch_profile_times['accum'].append(t_accum)
+                    
+                    # Clear cache every 50 batches to help with memory fragmentation
+                    if num_epoch_batches % 50 == 0:
+                        if torch.cuda.is_available():
+                            torch.cuda.empty_cache()
                     
                     # Save shapes every N shapes if enabled
                     if self.save_shapes_every > 0:
@@ -645,15 +663,15 @@ class MeshDecoderTrainer:
                     # Calculate percentages for active losses
                     if 'chamfer' in weighted_losses:
                         chamfer_pct = (weighted_losses['chamfer'] / total_loss) * 100
-                        contributions.append(f"Chamfer/{chamfer_pct:.0f}%")
+                        contributions.append(f"Ch:/{chamfer_pct:.0f}%")
                     
                     if 'edge_length' in weighted_losses:
                         edge_pct = (weighted_losses['edge_length'] / total_loss) * 100
-                        contributions.append(f"Edge/{edge_pct:.0f}%")
+                        contributions.append(f"Ed:/{edge_pct:.0f}%")
                     
                     if 'laplacian' in weighted_losses:
                         laplacian_pct = (weighted_losses['laplacian'] / total_loss) * 100
-                        contributions.append(f"Laplacian/{laplacian_pct:.0f}%")
+                        contributions.append(f"Lap:/{laplacian_pct:.0f}%")
                     
                     if 'normal' in weighted_losses:
                         normal_pct = (weighted_losses['normal'] / total_loss) * 100
@@ -661,38 +679,42 @@ class MeshDecoderTrainer:
                     
                     if 'quality' in weighted_losses:
                         quality_pct = (weighted_losses['quality'] / total_loss) * 100
-                        contributions.append(f"Quality/{quality_pct:.0f}%")
+                        contributions.append(f"Qual:/{quality_pct:.0f}%")
                     
                     if 'norm' in weighted_losses:
                         norm_pct = (weighted_losses['norm'] / total_loss) * 100
-                        contributions.append(f"Norm/{norm_pct:.0f}%")
+                        contributions.append(f"Reg:/{norm_pct:.0f}%")
                     
                     # Format contributions string
                     contributions_str = "/".join(contributions)
                     
                     postfix_dict = {
-                        'Total': f'{total_loss:.4f}',
-                        'Contributions': f'{contributions_str}'
+                        'L': f'{total_loss:.4f}',
+                        'C': f'{contributions_str}'
                     }
                     
                     batch_progress.set_postfix(postfix_dict)
 
                 # Remesh template if time
                 if (epoch + 1) % self.remesh_every == 0:
-                    t_remesh = time()
+                    if self.profiling:
+                        t_remesh = time()
                     self._remesh_template_from_mean_shape(
                         self.remesh_every_edge_length_ratio
                     )
-                    t_remesh = time() - t_remesh
-                    self.profile_times['remesh'].append(t_remesh)
+                    if self.profiling:
+                        t_remesh = time() - t_remesh
+                        self.profile_times['remesh'].append(t_remesh)
 
                 if (epoch + 1) in self.remesh_at:
                     ra_idx = self.remesh_at.index[epoch + 1]
                     ratio = self.remesh_at_edge_length_ratio[ra_idx]
-                    t_remesh = time()
+                    if self.profiling:
+                        t_remesh = time()
                     self._remesh_template_from_mean_shape(ratio)
-                    t_remesh = time() - t_remesh
-                    self.profile_times['remesh'].append(t_remesh)
+                    if self.profiling:
+                        t_remesh = time() - t_remesh
+                        self.profile_times['remesh'].append(t_remesh)
 
 
                 # Close batch progress bar
@@ -703,12 +725,14 @@ class MeshDecoderTrainer:
                     epoch_losses[name] /= num_epoch_batches
 
                 # Compute epoch profile times
-                for key, times in epoch_profile_times.items():
-                    self.profile_times[key].append(np.sum(times))
+                if self.profiling:
+                    for key, times in epoch_profile_times.items():
+                        self.profile_times[key].append(np.sum(times))
 
                 # Save model if it improved
                 if epoch_losses['loss'] <= self.best_loss:
-                    t_save = time()
+                    if self.profiling:
+                        t_save = time()
                     self.best_loss = epoch_losses['loss']
                     self.best_epoch_losses = epoch_losses
                     self.best_epoch = epoch
@@ -722,13 +746,15 @@ class MeshDecoderTrainer:
                     # Save new best model
                     if not self.no_checkpoints:
                         self.save_checkpoint(epoch)
-                    t_save = time() - t_save
-                    self.profile_times['save'].append(t_save)
+                    if self.profiling:
+                        t_save = time() - t_save
+                        self.profile_times['save'].append(t_save)
 
                 self.scheduler.step(epoch_losses['loss'])
 
                 t_epoch = time() - t_epoch
-                self.profile_times['epoch'].append(t_epoch)
+                if self.profiling:
+                    self.profile_times['epoch'].append(t_epoch)
 
                 # Logging
                 if self.log_wandb:
@@ -741,10 +767,11 @@ class MeshDecoderTrainer:
                         'epoch': epoch,
                     }
                     for key, val in epoch_losses.items():
-                        log_dict[f'loss/{key}'] = val.detach().item()
-                    for key, val in epoch_profile_times.items():
-                        log_dict[f'prof/{key}'] = np.sum(val)
-                    log_dict['prof/epoch'] = t_epoch
+                        log_dict[f'loss/{key}'] = val
+                    if self.profiling:
+                        for key, val in epoch_profile_times.items():
+                            log_dict[f'prof/{key}'] = np.sum(val)
+                        log_dict['prof/epoch'] = t_epoch
                     wandb.log(log_dict)
 
                 # Update epoch progress bar with weighted loss components and percentages
@@ -796,9 +823,9 @@ class MeshDecoderTrainer:
                 epoch_contributions_str = "/".join(epoch_contributions)
                 
                 epoch_postfix = {
-                    'Total': f'{total_epoch_loss:.4f}',
-                    'Contributions': f'{epoch_contributions_str}',
-                    'Time': f'{t_epoch:.1f}s'
+                    'L': f'{total_epoch_loss:.4f}',
+                    '': f'{epoch_contributions_str}',
+                    't': f'{t_epoch:.1f}s'
                 }
                 
                 epoch_progress.set_postfix(epoch_postfix)
@@ -967,8 +994,9 @@ class MeshDecoderTrainer:
             'best_epoch': self.best_epoch,
             'best_loss': self.best_loss,
             'best_epoch_losses': self.best_epoch_losses,
-            'profile_times': self.profile_times,
         }
+        if self.profiling:
+            state['profile_times'] = self.profile_times
 
         fname = f"MeshDecoderTrainer_"
         fname += self.train_start_time.strftime('%Y-%m-%d_%H-%M')
@@ -992,7 +1020,8 @@ class MeshDecoderTrainer:
         self.best_epoch = state['best_epoch']
         self.best_loss = state['best_loss']
         self.best_epoch_losses = state['best_epoch_losses']
-        self.profile_times = state['profile_times']
+        if self.profiling and 'profile_times' in state:
+            self.profile_times = state['profile_times']
         return epoch
 
 
@@ -1001,19 +1030,23 @@ class MeshDecoderTrainer:
               f"{self.best_epoch_losses['loss']}")
         for key, value in self.best_epoch_losses.items():
             print(f'  {key:15}: {value:8.6f}')
-        total_time = datetime.timedelta(
-            seconds=np.sum(self.profile_times['epoch'])
-        )
-        mean_time = np.mean(self.profile_times['epoch'])
-        print(f'{self.num_epochs} epochs in {total_time} '
-              f'({mean_time:.4f} sec/epoch)')
-        print('mean profile times:')
-        profile_sum = 0
-        for key, value in self.profile_times.items():
-            if key == 'epoch':
-                continue
-            profile_sum += np.mean(value)
-            print(f'  {key:10}: {np.mean(value):8.6f} sec')
-        print('------------------------------')
-        print(f'  sum       : {profile_sum:8.6f} sec')
+        
+        if self.profiling and hasattr(self, 'profile_times') and 'epoch' in self.profile_times:
+            total_time = datetime.timedelta(
+                seconds=np.sum(self.profile_times['epoch'])
+            )
+            mean_time = np.mean(self.profile_times['epoch'])
+            print(f'{self.num_epochs} epochs in {total_time} '
+                  f'({mean_time:.4f} sec/epoch)')
+            print('mean profile times:')
+            profile_sum = 0
+            for key, value in self.profile_times.items():
+                if key == 'epoch':
+                    continue
+                profile_sum += np.mean(value)
+                print(f'  {key:10}: {np.mean(value):8.6f} sec')
+            print('------------------------------')
+            print(f'  sum       : {profile_sum:8.6f} sec')
+        else:
+            print('Profiling was disabled - no timing information available')
 

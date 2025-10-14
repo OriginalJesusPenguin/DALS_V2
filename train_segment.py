@@ -66,17 +66,18 @@ def train_conv_net(args):
         )
 
     t_load = time()
-    train_data = torch.load(args.train_data_path)
+    train_data = torch.load(args.train_data_path, map_location='cpu')
+    print('Training data loaded!')
     if args.simulate_slice_annot:
         train_data['masks'] = simulate_slice_annot(train_data['labels'],
                                                    args.slicing_mode)
-    val_data = torch.load(args.val_data_path)
-
+    val_data = torch.load(args.val_data_path, map_location='cpu')
+    print('Validation data loaded!')
     train_data = dict_unzip(train_data)
     val_data = dict_unzip(val_data)
 
-    train_data = train_data[args.train_subset[0]:args.train_subset[1]]
-    val_data = val_data[args.val_subset[0]:args.val_subset[1]]
+    # train_data = train_data[args.train_subset[0]:args.train_subset[1]]
+    # val_data = val_data[args.val_subset[0]:args.val_subset[1]]
 
     t_load = time() - t_load
     print(f'Loaded data in {t_load:.2f} seconds')
