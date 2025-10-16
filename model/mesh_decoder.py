@@ -272,7 +272,7 @@ class MeshDecoderTrainer:
         # Model parameters
         parser.add_argument('--latent_features', type=int, default=128)
         parser.add_argument('--steps', type=int, default=1)
-        parser.add_argument('--subdivide', type=bool, default=False)
+        parser.add_argument('--subdivide', action='store_true', default=False)
         parser.add_argument('--hidden_features', type=int, nargs='+',
                             default=[256, 256, 128])
         parser.add_argument('--concat_latent_at', type=int, nargs='*',
@@ -318,7 +318,7 @@ class MeshDecoderTrainer:
         parser.add_argument('--checkpoint_dir', type=str, default='.')
         parser.add_argument('--random_seed', type=int, default=1337)
         parser.add_argument('--resume_from')
-        parser.add_argument('--profiling', type=bool, default=False)
+        parser.add_argument('--profiling', action='store_true', default=False)
 
         return parent_parser
 

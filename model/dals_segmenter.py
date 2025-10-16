@@ -523,6 +523,7 @@ class ConvNetTrainer:
         }
 
         fname = type(self).__name__ + '_'
+        fname += self.hparams['model'] + '_'  # Add model name from hparams
         fname += self.train_start_time.strftime('%Y-%m-%d_%H-%M')
         if len(self.checkpoint_postfix) > 0:
             fname += f'_{self.checkpoint_postfix}'

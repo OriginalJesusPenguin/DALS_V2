@@ -103,7 +103,8 @@ os.makedirs(args.output_dir, exist_ok=True)
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 # checkpoint_path = sorted(glob(join(args.checkpoint_dir, '*MeshDecoder*.ckpt')))[-1]
-checkpoint_path = '/home/ralbe/DALS/mesh_autodecoder/MeshDecoderTrainer_2025-10-03_15-58.ckpt'
+# checkpoint_path = '/home/ralbe/DALS/mesh_autodecoder/MeshDecoderTrainer_2025-10-03_15-58.ckpt'
+checkpoint_path = '/home/ralbe/DALS/mesh_autodecoder/scripts/rami_scripts/MeshDecoderTrainer_2025-10-16_10-50.ckpt'
 # checkpoint_path = '/home/ralbe/DALS/mesh_autodecoder/LocalMeshDecoderTrainer_2025-10-03_16-29.ckpt'
 print('Loading checkpoint:',  checkpoint_path)
 
@@ -451,6 +452,8 @@ torch.save({
     'args': args,
 }, out_fname)
 
+
+print(metrics)
 # Save latent vectors and filenames with automatic suffix if file exists
 base_latent_fname = join(args.output_dir, 'latent_vectors.pt')
 latent_fname = base_latent_fname
