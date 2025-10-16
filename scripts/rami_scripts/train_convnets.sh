@@ -2,16 +2,18 @@
 
 # ConvNet models
 CONV_NET_MODELS=('ResUNet' 'VNet' 'DynUNet' 'UNETR' 'UNET' 'SYNVNET3D' 'SEGRESNET')
-
+# CONV_NET_MODELS=('VNet' 'UNETR' 'DynUNet')
 # Submit one job per ConvNet model
 for MODEL in "${CONV_NET_MODELS[@]}"; do
     echo "Submitting job for $MODEL..."
     
-    # Set batch size conditionally to avoid OOM on heavy models
+    # Set batch size for 24GB GPUs (RTX A5000 with 24.5GB memory)
     if [[ "$MODEL" == "DynUNet" || "$MODEL" == "SYNVNET3D" ]]; then
-        BATCH_SIZE=1
+        BATCH_SIZE=1  # Increased from 1 due to 24GB memory
+    elif [[ "$MODEL" == "UNETR" ]]; then
+        BATCH_SIZE=1  # UNETR is memory intensive
     else
-        BATCH_SIZE=2
+        BATCH_SIZE=2  # Increased from 2 due to 24GB memory
     fi
     
     # Create a temporary script for this model
@@ -24,8 +26,9 @@ for MODEL in "${CONV_NET_MODELS[@]}"; do
 #SBATCH --error="${MODEL}.err"
 #SBATCH --time=03:00:00
 #SBATCH --partition=titans
+#SBATCH --nodelist=comp-gpu14
 #SBATCH --gres=gpu:1
-#SBATCH --cpus-per-task=4
+#SBATCH --cpus-per-task=2
 #SBATCH --mem=32GB
 
 
@@ -37,11 +40,20 @@ conda activate mesh_autodecoder
 cd /home/ralbe/DALS/mesh_autodecoder
 
 # Run training
+
+# Memory optimization for 24GB GPUs
+export PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:512
+export CUDA_LAUNCH_BLOCKING=1
+export LD_LIBRARY_PATH="/home/ralbe/DALS/mesh_autodecoder/util/bin:$LD_LIBRARY_PATH"
+
+# Additional optimizations for large memory GPUs
+export TORCH_CUDNN_V8_API_ENABLED=1
+
 python train_segment.py \
     --train_data_path /scratch/ralbe/dals_data/train_data_mixed.pt \
     --val_data_path /scratch/ralbe/dals_data/val_data_mixed.pt \
     conv_net \
-    --num_epochs 100 \
+    --num_epochs 200 \
     --batch_size ${BATCH_SIZE} \
     --model ${MODEL} \
     --data_size 192 192 192 \

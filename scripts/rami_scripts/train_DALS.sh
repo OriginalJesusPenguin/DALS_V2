@@ -1,11 +1,16 @@
 #!/bin/bash
 
 # Configuration
-DATA_PATH="/home/ralbe/pyhppc_project/cirr_segm_clean/augmented_meshes"
-NUM_VAL_SAMPLES=0
+# DATA_PATH="/home/ralbe/pyhppc_project/cirr_segm_clean/augmented_meshes"
+DATA_PATH="/home/ralbe/pyhppc_project/cirr_segm_clean/unit_sphere_meshes"
+# 
+NUM_VAL_SAMPLES=1
 NUM_AUGMENT=0
 DATA_RANDOM_SEED=1337
 MODEL="mesh_decoder"
+
+
+# conda a
 
 # Submit one job per decoder model
 echo "Submitting job for $MODEL..."
@@ -16,7 +21,7 @@ sbatch --job-name="${MODEL}" \
         --partition=titans \
         --gres=gpu:1 \
         --cpus-per-task=4 \
-        --mem=16GB \
+        --mem=4GB \
         --wrap="source /home/ralbe/miniconda3/etc/profile.d/conda.sh && \
                 conda activate mesh_autodecoder && \
                 python /home/ralbe/DALS/mesh_autodecoder/train.py \
@@ -29,8 +34,6 @@ sbatch --job-name="${MODEL}" \
                     --latent_features 128 \
                     --hidden_features 724 724 362 \
                     --decoder_mode gcnn \
-                    --profiling False \
-                    --subdivide False \
                     --encoding none \
                     --normalization layer \
                     --rotate_template \
