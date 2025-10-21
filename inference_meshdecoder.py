@@ -104,7 +104,8 @@ device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 # checkpoint_path = sorted(glob(join(args.checkpoint_dir, '*MeshDecoder*.ckpt')))[-1]
 # checkpoint_path = '/home/ralbe/DALS/mesh_autodecoder/MeshDecoderTrainer_2025-10-03_15-58.ckpt'
-checkpoint_path = '/home/ralbe/DALS/mesh_autodecoder/scripts/rami_scripts/MeshDecoderTrainer_2025-10-16_10-50.ckpt'
+# checkpoint_path = '/home/ralbe/DALS/mesh_autodecoder/scripts/rami_scripts/MeshDecoderTrainer_2025-10-16_10-50.ckpt'
+checkpoint_path = '/home/ralbe/DALS/mesh_autodecoder/scripts/rami_scripts/MeshDecoderTrainer_2025-10-16_14-48.ckpt'
 # checkpoint_path = '/home/ralbe/DALS/mesh_autodecoder/LocalMeshDecoderTrainer_2025-10-03_16-29.ckpt'
 print('Loading checkpoint:',  checkpoint_path)
 
@@ -130,9 +131,6 @@ template = checkpoint['template']
 
 # Load and augment data
 
-#data_path = '/work1/patmjen/meshfit/datasets/shapes/liver/raw/'
-#data_path = '/work1/patmjen/meshfit/datasets/shapes/spleen/raw/'
-#data_path = '/work1/patmjen/meshfit/datasets/shapes/ShapeNetV2/planes/'
 print('Loading data from:', args.data_path)
 meshes = load_meshes_in_dir(args.data_path)
 print('Found', len(meshes), 'meshes')
@@ -287,13 +285,6 @@ elif args.latent_mode == 'local':
         lv.requires_grad_(True)
 
         num_verts = len(search_template.verts_packed())
-        #L = laplacian(search_template.verts_packed(), search_template.edges_packed()).to_dense()
-        #I = torch.eye(num_verts, device=L.device)
-        #M = I - 1e-2 * L
-        #M_inv = torch.linalg.inv(M)
-        #M_inv2 = M_inv @ M_inv
-        #M_inv4 = M_inv2 @ M_inv2
-
         decoder.eval()
         decoder.requires_grad_(False)
         decoder.to(device)
@@ -324,9 +315,7 @@ elif args.latent_mode == 'local':
             loss += args.weight_bl_quality_loss * mesh_bl_quality_loss(pred_mesh)
             # loss += args.weight_edge_length_loss * mesh_edge_loss_highdim(pred_mesh, lv)
             loss += args.weight_edge_length_loss * mesh_laplacian_loss_highdim(pred_mesh, lv)
-            # loss += 1e-2 * mesh_laplacian_smoothing(pred_mesh)
-            # loss += 1e-2 * torch.sum(torch.norm(L.mm(pred_mesh.verts_packed()), dim=1) / num_verts)
-
+            
             loss.backward()
 
             if loss < 1.05 * min_loss:

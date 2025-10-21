@@ -29,9 +29,8 @@ def train_mesh_decoder(args):
     # Load data
     t_load = time()
     print('Loading data...')
-    data = load_meshes_in_dir(args.data_path)
-    train_data = data[:-args.num_val_samples]
-    val_data = data[-args.num_val_samples:]
+    train_data = load_meshes_in_dir(args.train_data_path)
+    val_data = load_meshes_in_dir(args.val_data_path)
     t_load = time() - t_load
     print(f'Loaded data in {t_load:.2f} seconds')
 
@@ -57,6 +56,9 @@ def train_mesh_decoder(args):
 
     # Train network
     trainer = MeshDecoderTrainer(log_wandb=(not args.no_wandb), **vars(args))
+    # Store data paths for checkpoint saving
+    trainer.train_data_path = args.train_data_path
+    trainer.val_data_path = args.val_data_path
     trainer.train(train_data, val_data)
 
 
@@ -116,9 +118,8 @@ def train_deep_sdf_decoder(args):
     # Load data
     t_load = time()
     print('Loading data...')
-    data = load_meshes_in_dir(args.data_path)
-    train_data = data[:-args.num_val_samples]
-    val_data = data[-args.num_val_samples:]
+    train_data = load_meshes_in_dir(args.train_data_path)
+    val_data = load_meshes_in_dir(args.val_data_path)
     t_load = time() - t_load
     print(f'Loaded data in {t_load:.2f} seconds')
 
@@ -159,9 +160,8 @@ def train_siren_decoder(args):
     # Load data
     t_load = time()
     print('Loading data...')
-    data = load_meshes_in_dir(args.data_path)
-    train_data = data[:-args.num_val_samples]
-    val_data = data[-args.num_val_samples:]
+    train_data = load_meshes_in_dir(args.train_data_path)
+    val_data = load_meshes_in_dir(args.val_data_path)
     t_load = time() - t_load
     print(f'Loaded data in {t_load:.2f} seconds')
 
@@ -202,9 +202,8 @@ def train_siren2_decoder(args):
     # Load data
     t_load = time()
     print('Loading data...')
-    data = load_meshes_in_dir(args.data_path)
-    train_data = data[:-args.num_val_samples]
-    val_data = data[-args.num_val_samples:]
+    train_data = load_meshes_in_dir(args.train_data_path)
+    val_data = load_meshes_in_dir(args.val_data_path)
     t_load = time() - t_load
     print(f'Loaded data in {t_load:.2f} seconds')
 
@@ -245,9 +244,8 @@ def train_local_mod_siren_decoder(args):
     # Load data
     t_load = time()
     print('Loading data...')
-    data = load_meshes_in_dir(args.data_path)
-    train_data = data[:-args.num_val_samples]
-    val_data = data[-args.num_val_samples:]
+    train_data = load_meshes_in_dir(args.train_data_path)
+    val_data = load_meshes_in_dir(args.val_data_path)
     t_load = time() - t_load
     print(f'Loaded data in {t_load:.2f} seconds')
 
@@ -283,7 +281,8 @@ def main(args):
     parser.add_argument('--no_wandb', action='store_true')
 
     data_parser = parser.add_argument_group('Data')
-    data_parser.add_argument('--data_path', type=str)
+    data_parser.add_argument('--train_data_path', type=str)
+    data_parser.add_argument('--val_data_path', type=str)
     data_parser.add_argument('--num_val_samples', type=int, default=5)
     data_parser.add_argument('--num_augment', type=int, default=100)
     data_parser.add_argument('--data_random_seed', type=int, default=1337)

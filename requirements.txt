@@ -116,7 +116,6 @@ pyparsing==3.1.4
 pyrender==0.1.45
 python-dateutil==2.9.0.post0
 python-json-logger==4.0.0
-pytorch3d==0.7.4
 pytz==2025.2
 PyWavelets==1.4.1
 PyYAML==6.0.3
@@ -149,9 +148,6 @@ tifffile==2023.7.10
 tinycss2==1.2.1
 toml==0.10.2
 tomli==2.2.1
-torch==1.10.2
-torchaudio==0.10.2
-torchvision==0.11.3
 tornado==6.4.2
 tqdm==4.62.3
 trailrunner==1.4.0

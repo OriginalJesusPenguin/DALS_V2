@@ -1,1 +1,1 @@
-Namespace(checkpoint_dir=None, checkpoint_jobid=None, data_path='/home/ralbe/pyhppc_project/cirr_segm_clean/test_unit_sphere_meshes', latent_mode='local', lr=0.001, max_iters=250, num_point_samples=2500, output_dir='.', point_sample_mode='uniform', remesh_at=[], remesh_at_end=False, remesh_with_forward_at_end=False, template_subdiv=4, train_test_split_idx=0, weight_bl_quality_loss=0.001, weight_edge_length_loss=100.0)
+<__main__.Args object at 0x7f56c95ef940>

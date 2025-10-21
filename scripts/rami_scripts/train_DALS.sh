@@ -2,7 +2,8 @@
 
 # Configuration
 # DATA_PATH="/home/ralbe/pyhppc_project/cirr_segm_clean/augmented_meshes"
-DATA_PATH="/home/ralbe/pyhppc_project/cirr_segm_clean/unit_sphere_meshes"
+TRAIN_DATA_PATH="/home/ralbe/pyhppc_project/cirr_segm_clean/healthy_T1_meshes"
+VAL_DATA_PATH="/home/ralbe/pyhppc_project/cirr_segm_clean/healthy_T1_meshes"
 # 
 NUM_VAL_SAMPLES=1
 NUM_AUGMENT=0
@@ -26,12 +27,13 @@ sbatch --job-name="${MODEL}" \
                 conda activate mesh_autodecoder && \
                 python /home/ralbe/DALS/mesh_autodecoder/train.py \
                     --device cuda \
-                    --data_path '$DATA_PATH' \
+                    --train_data_path '$TRAIN_DATA_PATH' \
+                    --val_data_path '$VAL_DATA_PATH' \
                     --num_val_samples $NUM_VAL_SAMPLES \
                     --num_augment $NUM_AUGMENT \
                     --data_random_seed $DATA_RANDOM_SEED \
                     mesh_decoder \
-                    --latent_features 128 \
+                    --latent_features 512 \
                     --hidden_features 724 724 362 \
                     --decoder_mode gcnn \
                     --encoding none \

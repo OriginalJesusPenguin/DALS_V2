@@ -994,16 +994,25 @@ class MeshDecoderTrainer:
             'best_epoch': self.best_epoch,
             'best_loss': self.best_loss,
             'best_epoch_losses': self.best_epoch_losses,
+            # Add specific parameters for easy retrieval
+            'train_data_path': getattr(self, 'train_data_path', None),
+            'val_data_path': getattr(self, 'val_data_path', None),
+            'latent_features': self.latent_features,
+            'decoder_mode': self.decoder_mode,
         }
         if self.profiling:
             state['profile_times'] = self.profile_times
 
         fname = f"MeshDecoderTrainer_"
-        fname += self.train_start_time.strftime('%Y-%m-%d_%H-%M')
+        fname += self.train_start_time.strftime('%Y-%m-%d_%H-%M-%S')
         if len(self.checkpoint_postfix) > 0:
             fname += f'_{self.checkpoint_postfix}'
         fname += '.ckpt'
-        fname = os.path.join(self.checkpoint_dir, fname)
+        
+        # Save to the models directory
+        models_dir = '/home/ralbe/DALS/mesh_autodecoder/models'
+        os.makedirs(models_dir, exist_ok=True)
+        fname = os.path.join(models_dir, fname)
         print('Saving checkpoint:', fname)
         torch.save(state, fname)
 

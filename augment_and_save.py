@@ -43,6 +43,28 @@ def save_mesh_to_obj(mesh, filepath):
             f.write(f"f {face[0]+1} {face[1]+1} {face[2]+1}\n")
 
 
+def normalize_mesh_unit_sphere(mesh: Meshes) -> Meshes:
+    """Center and scale a single mesh to unit sphere (max radius ~= 1).
+
+    If max radius is extremely small, returns the mesh unchanged.
+    """
+    verts = mesh.verts_packed()
+    faces = mesh.faces_packed()
+
+    # Center
+    verts_centered = verts - verts.mean(dim=0, keepdim=True)
+
+    # Scale by max norm
+    norms = torch.sqrt((verts_centered ** 2).sum(1))
+    max_norm = norms.max()
+    if max_norm.item() < 1e-8:
+        return mesh
+    scale = (1.0 / max_norm) * 0.999999
+    verts_scaled = verts_centered * scale
+
+    return Meshes([verts_scaled], [faces])
+
+
 def augment_and_save_meshes(
     input_dir,
     output_dir,
@@ -89,10 +111,13 @@ def augment_and_save_meshes(
         
         print(f"\nProcessing batch {batch_start//batch_size + 1}: meshes {batch_start}-{batch_end-1}")
         
+        # Normalize to unit sphere before augmentation to match kernel scale
+        normalized_batch_meshes = [normalize_mesh_unit_sphere(m) for m in batch_meshes]
+
         # Augment this batch
         t_aug = time()
         augmented_meshes = augment_meshes(
-            batch_meshes,
+            normalized_batch_meshes,
             num_augment=num_augment,
             **augment_params
         )
@@ -146,8 +171,9 @@ def main():
     # PointWOLF parameters
     parser.add_argument('--pw_num_anchor', type=int, default=4)
     parser.add_argument('--pw_sample_type', type=str, default='fps')
-    parser.add_argument('--pw_sigma', type=float, default=0.5)
-    parser.add_argument('--pw_r_range', type=float, default=10)
+    # Use a much smaller sigma assuming inputs are normalized before augmentation
+    parser.add_argument('--pw_sigma', type=float, default=0.05)
+    parser.add_argument('--pw_r_range', type=float, default=1)
     parser.add_argument('--pw_s_range', type=float, default=2)
     parser.add_argument('--pw_t_range', type=float, default=0.25)
     
