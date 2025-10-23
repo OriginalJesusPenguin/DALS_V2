@@ -23,7 +23,6 @@ SOFTWARE.
 """
 
 from typing import Sequence, List
-import os
 
 from tqdm import tqdm
 
@@ -33,10 +32,6 @@ import numpy as np
 
 from pytorch3d.structures import Meshes
 from pytorch3d.ops import sample_farthest_points
-
-
-# Debug flag (enable by setting environment variable POINT_WOLF_DEBUG=1)
-DEBUG = os.environ.get('POINT_WOLF_DEBUG', '0') == '1'
 
 
 def augment_points(
@@ -63,8 +58,6 @@ def augment_points(
         device = torch.device(device)
     else:
         device = meshes[0].device
-    if DEBUG:
-        print(f"[PointWOLF][augment_points] device={device}, num_augment={num_augment}, num_anchor={num_anchor}, sample_type={sample_type}")
     pw = PointWOLF(
         num_anchor=num_anchor,
         sample_type=sample_type,
@@ -80,11 +73,6 @@ def augment_points(
         points = tqdm(points)
     for p in points:
         p_d = p.to(device)
-        if DEBUG:
-            p_min = float(p_d.min()) if p_d.numel() else 0.0
-            p_max = float(p_d.max()) if p_d.numel() else 0.0
-            p_mean = float(p_d.mean()) if p_d.numel() else 0.0
-            print(f"[PointWOLF][augment_points] input stats: shape={tuple(p_d.shape)}, min={p_min:.6f}, max={p_max:.6f}, mean={p_mean:.6f}")
         for _ in range(num_augment):
             aug_points.append(pw(p_d)[1].to(p.device))
 
@@ -114,8 +102,6 @@ def augment_meshes(
         device = torch.device(device)
     else:
         device = meshes[0].device
-    if DEBUG:
-        print(f"[PointWOLF][augment_meshes] device={device}, meshes={len(meshes)}, num_augment={num_augment}, num_anchor={num_anchor}, sample_type={sample_type}")
     pw = PointWOLF(
         num_anchor=num_anchor,
         sample_type=sample_type,
@@ -132,12 +118,6 @@ def augment_meshes(
     for mesh in meshes:
         verts = mesh.verts_packed().to(device)
         faces = mesh.faces_packed().unsqueeze(0)
-        if DEBUG:
-            v_min = float(verts.min()) if verts.numel() else 0.0
-            v_max = float(verts.max()) if verts.numel() else 0.0
-            v_mean = float(verts.mean()) if verts.numel() else 0.0
-            print(f"[PointWOLF][augment_meshes] verts: shape={tuple(verts.shape)}, device={verts.device}, min={v_min:.6f}, max={v_max:.6f}, mean={v_mean:.6f}")
-            print(f"[PointWOLF][augment_meshes] faces: shape={tuple(faces.shape)}, device={faces.device}")
 
         for _ in range(num_augment):
             aug_meshes.append(Meshes(
@@ -194,28 +174,19 @@ class PointWOLF(object):
         device = pos.device
         M = self.num_anchor  # (M x 3)
         N, _=pos.shape  # (N)
-        if DEBUG:
-            p_min = float(pos.min()) if pos.numel() else 0.0
-            p_max = float(pos.max()) if pos.numel() else 0.0
-            p_mean = float(pos.mean()) if pos.numel() else 0.0
-            print(f"[PointWOLF][__call__] N={N}, M={M}, sample_type={self.sample_type}, sigma={self.sigma}, R={self.R_range}, S={self.S_range}, T={self.T_range}")
-            print(f"[PointWOLF][__call__] pos stats: min={p_min:.6f}, max={p_max:.6f}, mean={p_mean:.6f}, device={device}")
         
         if self.sample_type == 'random':
-            # Sample M unique anchor indices uniformly at random
-            M_eff = min(M, N)
-            idx = torch.randperm(N, device=device)[:M_eff]
-            pos_anchor = pos[idx]  # (M_eff, 3), anchor points
+            idx = torch.multinomial(
+                torch.ones(1, device=device).expand(N, 1),
+                M,
+            )
+            pos_anchor = pos[idx]  # (M, 3), anchor point
         elif self.sample_type == 'fps':
             pos_anchor = sample_farthest_points(
                 pos.unsqueeze(0),
                 torch.tensor([M], device=device),
                 M
             )[0][0]  # Select first output and remove batch dimension.
-        if DEBUG:
-            a_min = float(pos_anchor.min()) if pos_anchor.numel() else 0.0
-            a_max = float(pos_anchor.max()) if pos_anchor.numel() else 0.0
-            print(f"[PointWOLF][__call__] anchors: shape={tuple(pos_anchor.shape)}, min={a_min:.6f}, max={a_max:.6f}")
         
         
         pos_repeat = pos.unsqueeze(0).expand(M, -1, -1) # (M, N, 3)
@@ -226,24 +197,12 @@ class PointWOLF(object):
         
         #Local transformation at anchor point
         pos_transformed = self.local_transformaton(pos_normalize)  # (M, N, 3)
-        if DEBUG:
-            lt_min = float(pos_transformed.min()) if pos_transformed.numel() else 0.0
-            lt_max = float(pos_transformed.max()) if pos_transformed.numel() else 0.0
-            print(f"[PointWOLF][__call__] local_transform stats: min={lt_min:.6f}, max={lt_max:.6f}")
         
         #Move to origin space
         pos_transformed = pos_transformed + pos_anchor.view(M, -1, 3) #(M, N, 3)
         
         pos_new = self.kernel_regression(pos, pos_anchor, pos_transformed)
-        if DEBUG:
-            kr_min = float(pos_new.min()) if pos_new.numel() else 0.0
-            kr_max = float(pos_new.max()) if pos_new.numel() else 0.0
-            print(f"[PointWOLF][__call__] kernel_regression stats: min={kr_min:.6f}, max={kr_max:.6f}")
         pos_new = self.normalize(pos_new)
-        if DEBUG:
-            n_min = float(pos_new.min()) if pos_new.numel() else 0.0
-            n_max = float(pos_new.max()) if pos_new.numel() else 0.0
-            print(f"[PointWOLF][__call__] normalized stats: min={n_min:.6f}, max={n_max:.6f}")
         
         return pos.float(), pos_new.float()
         
@@ -276,14 +235,7 @@ class PointWOLF(object):
         # Kernel regression
         weight = torch.exp(-0.5 * (sub ** 2) / (self.sigma ** 2))  # (M, N) 
         pos_new = torch.sum(weight.unsqueeze(2).expand(-1, -1, 3) * pos_transformed, dim=0)  # (N, 3)
-        ws = weight.sum(dim=0, keepdim=True).T
-        if DEBUG:
-            w_min = float(weight.min()) if weight.numel() else 0.0
-            w_max = float(weight.max()) if weight.numel() else 0.0
-            ws_min = float(ws.min()) if ws.numel() else 0.0
-            ws_max = float(ws.max()) if ws.numel() else 0.0
-            print(f"[PointWOLF][kernel_regression] weight: min={w_min:.6f}, max={w_max:.6f}; sum min={ws_min:.6f}, max={ws_max:.6f}")
-        pos_new = pos_new / torch.clamp(ws, min=1e-8)  # Normalize by weight with clamp
+        pos_new = pos_new / weight.sum(dim=0, keepdim=True).T  # Normalize by weight
         return pos_new
 
     
@@ -374,13 +326,6 @@ class PointWOLF(object):
             pos([N,3]) : normalized Pointcloud
         """
         pos = pos - pos.mean(dim=-2, keepdim=True)
-        max_norm = torch.sqrt((pos ** 2).sum(1)).max()
-        if DEBUG:
-            print(f"[PointWOLF][normalize] max_norm={float(max_norm):.6f}")
-        if max_norm < 1e-8:
-            if DEBUG:
-                print("[PointWOLF][normalize] Very small norm, skipping normalization")
-            return pos
-        scale = (1 / max_norm) * 0.999999
+        scale = (1 / torch.sqrt((pos ** 2).sum(1)).max()) * 0.999999
         pos = scale * pos
         return pos

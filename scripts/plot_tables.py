@@ -20,11 +20,39 @@ def format_table_df(df: pd.DataFrame) -> pd.DataFrame:
     df['decoder'] = df['decoder_mode']
     df['latent_dim'] = df['latent_dim']
     df['ChamferL2 x 10000_mean'] = df['ChamferL2 x 10000_mean'].astype(float)
+    
+    # Remove duplicates: keep only the best result (smallest chamfer) for each combination
+    print(f"Before deduplication: {len(df)} rows")
+    
+    # Handle NaN values in chamfer before deduplication
+    df_clean = df.dropna(subset=['ChamferL2 x 10000_mean'])
+    if len(df_clean) < len(df):
+        print(f"Removed {len(df) - len(df_clean)} rows with NaN chamfer values")
+    
+    # Group by combination and keep the one with smallest chamfer
+    if len(df_clean) > 0:
+        df_dedup = df_clean.groupby(['augmentation', 'scaling', 'decoder', 'latent_dim']).apply(
+            lambda x: x.loc[x['ChamferL2 x 10000_mean'].idxmin()]
+        ).reset_index(drop=True)
+        
+        print(f"After deduplication: {len(df_dedup)} rows")
+        
+        # Show which combinations had duplicates
+        combo_counts = df_clean.groupby(['augmentation', 'scaling', 'decoder', 'latent_dim']).size()
+        duplicates = combo_counts[combo_counts > 1]
+        if len(duplicates) > 0:
+            print(f"Found {len(duplicates)} combinations with duplicates:")
+            for combo, count in duplicates.items():
+                print(f"  {combo}: {count} entries")
+    else:
+        print("No valid data after cleaning NaN values")
+        df_dedup = df_clean
+    
     # Round chamfer for readability
-    df['chamfer'] = df['ChamferL2 x 10000_mean'].map(lambda v: f"{v:.2f}" if np.isfinite(v) else "")
+    df_dedup['chamfer'] = df_dedup['ChamferL2 x 10000_mean'].map(lambda v: f"{v:.2f}" if np.isfinite(v) else "")
 
     # Reorder/select columns
-    table_df = df[['augmentation', 'scaling', 'decoder', 'latent_dim', 'chamfer']]
+    table_df = df_dedup[['augmentation', 'scaling', 'decoder', 'latent_dim', 'chamfer']].copy()
 
     # Sort for consistent display
     cat_aug = pd.CategoricalDtype(categories=['no', 'yes'], ordered=True)
@@ -63,11 +91,22 @@ def render_table_image(table_df: pd.DataFrame, title: str, out_path: str):
     table.set_fontsize(10)
     table.scale(1, 1.2)
 
-    # Bold header
+    # Find the row with the smallest chamfer distance
+    best_row_idx = None
+    if len(table_df) > 0:
+        # Convert chamfer values back to float for comparison
+        chamfer_values = table_df['chamfer'].apply(lambda x: float(x) if x != "" else float('inf'))
+        best_row_idx = chamfer_values.idxmin()
+        print(f"Best performing combination (row {best_row_idx + 1}): {table_df.iloc[best_row_idx].to_dict()}")
+
+    # Style the table
     for (row, col), cell in table.get_celld().items():
-        if row == 0:
+        if row == 0:  # Header row
             cell.set_text_props(weight='bold')
             cell.set_facecolor('#f0f0f0')
+        elif row == best_row_idx + 1:  # Best performing row (accounting for header)
+            cell.set_text_props(weight='bold')
+            cell.set_facecolor('#e8f5e8')  # Light green background
 
     plt.tight_layout()
     os.makedirs(os.path.dirname(out_path), exist_ok=True)

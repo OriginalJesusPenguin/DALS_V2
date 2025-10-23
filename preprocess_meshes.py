@@ -102,7 +102,7 @@ class MeshPreprocessor:
             filename = os.path.basename(mesh_file)
             patient_id = self.extract_patient_id_from_filename(filename)
             
-            if patient_id in self.test_indices:
+            if patient_id in self.test_indices: 
                 test_meshes.append(mesh_file)
             else:
                 val_meshes.append(mesh_file)

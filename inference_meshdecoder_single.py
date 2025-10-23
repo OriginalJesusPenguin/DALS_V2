@@ -1,14 +1,20 @@
+#!/usr/bin/env python3
+"""
+Single-model inference script for parallel processing.
+Processes one checkpoint and writes results to individual CSV file.
+"""
+
 import torch
-import glob
 import os
 import csv
 import sys
 import numpy as np
-from collections import defaultdict
+import argparse
 from time import time
 from glob import glob
 from os.path import join, basename
 from tqdm import tqdm
+import trimesh
 
 # Add project to path
 sys.path.append('/home/ralbe/DALS/mesh_autodecoder')
@@ -49,63 +55,15 @@ except ImportError:
 # Set device
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-# Load all checkpoints and extract parameters
-models_folder = '/home/ralbe/DALS/mesh_autodecoder/models'
-all_ckpt_files = glob(os.path.join(models_folder, '*.ckpt'))
-models_list = [f for f in all_ckpt_files if 'MeshDecoderTrainer' in os.path.basename(f)]
-models_list = models_list
-
-print(f"Found {len(models_list)} checkpoints to process")
-
-results = []
-for model_file in models_list:
-    loaded_checkpoint = torch.load(model_file, map_location=torch.device('cpu'))
-    latent_vectors = loaded_checkpoint['latent_vectors']
-    train_data_path = loaded_checkpoint['train_data_path']
-    decoder_mode = loaded_checkpoint['decoder_mode']
-
-    # Extract the parent folder name one above 'train_meshes'
-    folder_name = os.path.basename(os.path.dirname(train_data_path))
-    if 'mixed' in folder_name:
-        split_type = 'mixed'
-    elif 'separate' in folder_name:
-        split_type = 'separate'
-    else:
-        split_type = None
-
-    if 'global' in folder_name:
-        scaling_type = 'global'
-    elif 'individual' in folder_name:
-        scaling_type = 'individual'
-    else:
-        scaling_type = None
-
-    if 'noaug' in folder_name:
-        augmentation_type = 'noaug'
-    elif 'aug' in folder_name:
-        augmentation_type = 'aug'
-    else:
-        augmentation_type = None
-
-    if isinstance(latent_vectors, torch.nn.Embedding):
-        latent_dim = latent_vectors.weight.shape[1]
-    else:
-        latent_dim = None
-
-    print(f"split_type: {split_type}, scaling_type: {scaling_type}, augmentation_type: {augmentation_type}, decoder_mode: {decoder_mode}, latent_dim: {latent_dim}")
-
-    results.append({
-        "DALS_path": model_file,
-        "split_type": split_type,
-        "augmentation_type": augmentation_type,
-        "scaling_type": scaling_type,
-        "decoder_mode": decoder_mode,
-        "latent_dim": latent_dim,
-        "train_data_path": train_data_path
-    })
-
-
-
+# Optimize GPU memory usage
+if torch.cuda.is_available():
+    torch.backends.cudnn.benchmark = True
+    torch.backends.cudnn.deterministic = False
+    # Enable mixed precision for faster inference
+    torch.backends.cuda.matmul.allow_tf32 = True
+    torch.backends.cudnn.allow_tf32 = True
+    # Clear GPU cache
+    torch.cuda.empty_cache()
 
 # Args dataclass for cleaner config
 class Args: pass
@@ -114,19 +72,37 @@ class Args: pass
 def get_inference_args():
     args = Args()
     args.latent_mode = "local" 
-    args.lr = 1e-3
-    args.num_point_samples = 2500
+    args.lr = 1e-3  # Increased learning rate for better optimization
+    args.num_point_samples = 2500  # Increased to 15k
     args.point_sample_mode = "fps"
-    args.max_iters = 250
-    args.template_subdiv = 4
+    args.max_iters = 2500  # Fixed iterations with learning rate reduction
+    args.template_subdiv = 4  # Keep at 3
     args.remesh_with_forward_at_end = False
     args.remesh_at_end = False
     args.remesh_at = []
     args.train_test_split_idx = 0
     args.weight_bl_quality_loss = 1e-3
-    args.weight_edge_length_loss = 1e2
-    args.batch_size = 64  # Process multiple meshes in parallel
+    args.weight_edge_length_loss = 2e-1
+    args.batch_size = 16  # Process multiple meshes in parallel
+    args.init_strategy = "mean"  # Options: "random", "mean", "zero"
     return args
+
+def save_mesh_to_obj(mesh, filepath):
+    """Save a PyTorch3D mesh to OBJ file"""
+    try:
+        # Extract vertices and faces
+        vertices = mesh.verts_packed().cpu().numpy()
+        faces = mesh.faces_packed().cpu().numpy()
+        
+        # Create trimesh object
+        trimesh_mesh = trimesh.Trimesh(vertices=vertices, faces=faces)
+        
+        # Save as OBJ
+        trimesh_mesh.export(filepath)
+        return True
+    except Exception as e:
+        print(f"Error saving mesh to {filepath}: {e}")
+        return False
 
 # Function to run inference on a single checkpoint
 def run_inference_on_checkpoint(checkpoint_info, args):
@@ -162,12 +138,23 @@ def run_inference_on_checkpoint(checkpoint_info, args):
     
     latent_vectors = checkpoint['latent_vectors']
     latent_vectors.eval()
+    latent_vectors.to(device)
     template = checkpoint['template']
     
     # Load test meshes
     print(f'Loading test data from: {test_data_path}')
     meshes = load_meshes_in_dir(test_data_path)
     print(f'Found {len(meshes)} test meshes')
+    
+    # Process all test samples
+    print(f'Processing all {len(meshes)} test samples')
+    
+    # Create output directory for saved meshes
+    model_name = os.path.basename(checkpoint_path).replace('.ckpt', '')
+    # model_name = '/home/ralbe/DALS/mesh_autodecoder/models/MeshDecoderTrainer_2025-10-23_14-01-45.ckpt'
+    mesh_output_dir = f'inference_results/meshes_{model_name}'
+    os.makedirs(mesh_output_dir, exist_ok=True)
+    print(f'Created mesh output directory: {mesh_output_dir}')
     
     if len(meshes) == 0:
         print("Warning: No test meshes found")
@@ -192,7 +179,15 @@ def run_inference_on_checkpoint(checkpoint_info, args):
             true_mesh = true_mesh.to(device)
             true_points = sample_points_from_meshes(true_mesh, args.num_point_samples)
             
-            lv = latent_vectors.weight.data.mean(dim=0).clone().to(device).unsqueeze(0)
+            # Initialize latent vector based on strategy
+            if args.init_strategy == "random":
+                lv = torch.randn(1, latent_vectors.weight.shape[1], device=device) * 0.1
+            elif args.init_strategy == "mean":
+                lv = latent_vectors.weight.data.mean(dim=0).clone().to(device).unsqueeze(0)
+            elif args.init_strategy == "zero":
+                lv = torch.zeros(1, latent_vectors.weight.shape[1], device=device)
+            else:
+                lv = torch.randn(1, latent_vectors.weight.shape[1], device=device) * 0.1
             lv.requires_grad_(True)
             optim = torch.optim.Adam([lv], lr=args.lr)
             search_template = pytorch3d.utils.ico_sphere(args.template_subdiv, device=device)
@@ -202,9 +197,11 @@ def run_inference_on_checkpoint(checkpoint_info, args):
             decoder.requires_grad_(False)
             
             min_loss, no_improvement_iters = np.inf, 0
-            best_iter, best_lv = -1, lv
+            best_iter, best_lv = -1, lv.clone()
             
             t0 = time()
+            current_lr = args.lr
+            lr_reduction_count = 0
             for it in range(args.max_iters):
                 optim.zero_grad()
                 pred_mesh = decoder(search_template, lv)[-1]
@@ -212,19 +209,36 @@ def run_inference_on_checkpoint(checkpoint_info, args):
                 loss = chamfer_distance(pred_points, true_points)[0]
                 loss.backward()
                 
+                # Gradient clipping for stability
+                torch.nn.utils.clip_grad_norm_(lv, max_norm=1.0)
+                
                 if loss < min_loss:
                     min_loss = loss
                     no_improvement_iters, best_iter = 0, it
-                    best_lv = lv
+                    best_lv = lv.clone()  # Make a copy
                 else:
                     no_improvement_iters += 1
-                if no_improvement_iters > 10: break
+                
+                # Reduce learning rate if no improvement for 100 iterations
+                if no_improvement_iters > 100 and lr_reduction_count < 3:  # Max 3 reductions
+                    current_lr *= 0.5  # Reduce by half
+                    for param_group in optim.param_groups:
+                        param_group['lr'] = current_lr
+                    no_improvement_iters = 0  # Reset counter
+                    lr_reduction_count += 1
+                    print(f"  Reduced learning rate to {current_lr:.2e} at iter {it}")
+                
                 optim.step()
+                
+                # Print progress every 50 iterations
+                if it % 50 == 0:
+                    print(f"  Iter {it}: Loss = {loss.item():.6f}, Best = {min_loss:.6f}, LR = {current_lr:.2e}")
                 
                 if it in remesh_at:
                     with torch.no_grad():
                         search_template = remesh_template_from_deformed(pred_mesh, search_template)
             t1 = time()
+            print(f"  Final loss: {min_loss:.6f} (best at iter {best_iter})")
             
             if args.remesh_with_forward_at_end:
                 with torch.no_grad():
@@ -240,8 +254,8 @@ def run_inference_on_checkpoint(checkpoint_info, args):
             t3 = time()
             
             # Compute metrics
-            true_point_samples = sample_points_from_meshes(true_mesh, 100000)
-            pred_point_samples = sample_points_from_meshes(pred_mesh, 100000)
+            true_point_samples = sample_points_from_meshes(true_mesh, 10000)  # Keep at 10k for metrics
+            pred_point_samples = sample_points_from_meshes(pred_mesh, 10000)  # Keep at 10k for metrics
             metrics = point_metrics(true_point_samples, pred_point_samples, [0.01, 0.02])
             metrics[f'ChamferL2 x {cf}'] = chamfer_distance(true_point_samples, pred_point_samples)[0] * cf
             metrics['BL quality'] = 1.0 - mesh_bl_quality_loss(pred_mesh)
@@ -255,6 +269,22 @@ def run_inference_on_checkpoint(checkpoint_info, args):
             metrics['Decode'] = t3 - t2
             metrics['Total'] = t3 - t0
             all_metrics.append(metrics)
+            
+            # Save the final optimized mesh
+            mesh_filename = f'optimized_mesh_{i:03d}.obj'
+            mesh_path = os.path.join(mesh_output_dir, mesh_filename)
+            if save_mesh_to_obj(pred_mesh, mesh_path):
+                print(f'Saved optimized mesh {i+1}/{len(meshes)}: {mesh_filename}')
+            
+            # Save the target (ground truth) mesh for comparison
+            target_filename = f'target_mesh_{i:03d}.obj'
+            target_path = os.path.join(mesh_output_dir, target_filename)
+            if save_mesh_to_obj(true_mesh, target_path):
+                print(f'Saved target mesh {i+1}/{len(meshes)}: {target_filename}')
+            
+            # Clear GPU cache to prevent memory buildup
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
     
     elif args.latent_mode == 'local':
         for i, true_mesh in enumerate(tqdm(meshes, desc="Local latent optimization")):
@@ -277,11 +307,13 @@ def run_inference_on_checkpoint(checkpoint_info, args):
             
             optim = torch.optim.Adam([lv], lr=args.lr)
             min_loss, no_improvement_iters = np.inf, 0
-            best_iter, best_lv = -1, lv
+            best_iter, best_lv = -1, lv.clone()
             
             m1, m2 = torch.zeros_like(lv), torch.zeros_like(lv)
             
             t0 = time()
+            current_lr = args.lr
+            lr_reduction_count = 0
             for it in range(args.max_iters):
                 optim.zero_grad()
                 lv.requires_grad_(True)
@@ -294,16 +326,30 @@ def run_inference_on_checkpoint(checkpoint_info, args):
                 loss += args.weight_edge_length_loss * mesh_laplacian_loss_highdim(pred_mesh, lv)
                 loss.backward()
                 
-                if loss < 1.05 * min_loss:
+                # Gradient clipping for stability
+                torch.nn.utils.clip_grad_norm_(lv, max_norm=1.0)
+                
+                if loss < min_loss:
                     min_loss = loss
                     no_improvement_iters, best_iter = 0, it
-                    best_lv = lv
+                    best_lv = lv.clone()  # Make a copy
                 else:
                     no_improvement_iters += 1
-                if no_improvement_iters > 10:
-                    pass
+                
+                # Reduce learning rate if no improvement for 100 iterations
+                if no_improvement_iters > 100 and lr_reduction_count < 3:  # Max 3 reductions
+                    current_lr *= 0.5  # Reduce by half
+                    for param_group in optim.param_groups:
+                        param_group['lr'] = current_lr
+                    no_improvement_iters = 0  # Reset counter
+                    lr_reduction_count += 1
+                    print(f"  Reduced learning rate to {current_lr:.2e} at iter {it}")
                 
                 optim.step()
+                
+                # Print progress every 50 iterations
+                if it % 50 == 0:
+                    print(f"  Iter {it}: Loss = {loss.item():.6f}, Best = {min_loss:.6f}, LR = {current_lr:.2e}")
                 
                 if it in remesh_at:
                     with torch.no_grad():
@@ -311,8 +357,9 @@ def run_inference_on_checkpoint(checkpoint_info, args):
                             pred_mesh, search_template, vert_features=[lv, best_lv, m1, m2])
                         lv, best_lv, m1, m2 = vert_features
                     lv.requires_grad = True
-                    optim = torch.optim.Adam([lv], lr=args.lr)
+                    optim = torch.optim.Adam([lv], lr=current_lr)  # Use current learning rate
             t1 = time()
+            print(f"  Final loss: {min_loss:.6f} (best at iter {best_iter})")
             
             if args.remesh_with_forward_at_end:
                 with torch.no_grad():
@@ -328,8 +375,8 @@ def run_inference_on_checkpoint(checkpoint_info, args):
             t3 = time()
             
             # Compute metrics
-            true_point_samples = sample_points_from_meshes(true_mesh, 100000)
-            pred_point_samples = sample_points_from_meshes(pred_mesh, 100000)
+            true_point_samples = sample_points_from_meshes(true_mesh, 2500)  # Keep at 10k for metrics
+            pred_point_samples = sample_points_from_meshes(pred_mesh, 2500)  # Keep at 10k for metrics
             metrics = point_metrics(true_point_samples, pred_point_samples, [0.01, 0.02])
             metrics[f'ChamferL2 x {cf}'] = chamfer_distance(true_point_samples, pred_point_samples)[0] * cf
             metrics['BL quality'] = 1.0 - mesh_bl_quality_loss(pred_mesh)
@@ -343,6 +390,22 @@ def run_inference_on_checkpoint(checkpoint_info, args):
             metrics['Decode'] = t3 - t2
             metrics['Total'] = t2 - t0
             all_metrics.append(metrics)
+            
+            # Save the final optimized mesh
+            mesh_filename = f'optimized_mesh_{i:03d}.obj'
+            mesh_path = os.path.join(mesh_output_dir, mesh_filename)
+            if save_mesh_to_obj(pred_mesh, mesh_path):
+                print(f'Saved optimized mesh {i+1}/{len(meshes)}: {mesh_filename}')
+            
+            # Save the target (ground truth) mesh for comparison
+            target_filename = f'target_mesh_{i:03d}.obj'
+            target_path = os.path.join(mesh_output_dir, target_filename)
+            if save_mesh_to_obj(true_mesh, target_path):
+                print(f'Saved target mesh {i+1}/{len(meshes)}: {target_filename}')
+            
+            # Clear GPU cache to prevent memory buildup
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
     
     # Aggregate metrics
     if len(all_metrics) == 0:
@@ -364,26 +427,84 @@ def run_inference_on_checkpoint(checkpoint_info, args):
     
     aggregated_metrics['num_test_samples'] = len(all_metrics)
     
+    # Print summary of saved meshes
+    saved_meshes = [f for f in os.listdir(mesh_output_dir) if f.endswith('.obj')]
+    optimized_count = len([f for f in saved_meshes if f.startswith('optimized_')])
+    target_count = len([f for f in saved_meshes if f.startswith('target_')])
+    print(f'Saved {optimized_count} optimized meshes and {target_count} target meshes to {mesh_output_dir}')
+    
     return aggregated_metrics
 
-# Main execution: iterate through all checkpoints
-print(f"\n{'='*80}")
-print(f"Starting inference sweep on {len(results)} checkpoints")
-print(f"{'='*80}\n")
-
-args = get_inference_args()
-
-# Process each checkpoint
-for idx, checkpoint_info in enumerate(results):
-    print(f"\n{'='*80}")
-    print(f"Processing checkpoint {idx+1}/{len(results)}")
-    print(f"Model: {os.path.basename(checkpoint_info['DALS_path'])}")
-    print(f"Config: {checkpoint_info['split_type']}_{checkpoint_info['scaling_type']}_{checkpoint_info['augmentation_type']}")
-    print(f"Decoder: {checkpoint_info['decoder_mode']}, Latent: {checkpoint_info['latent_dim']}")
-    print(f"{'='*80}\n")
+def main():
+    parser = argparse.ArgumentParser(description='Run inference on a single model checkpoint')
+    parser.add_argument('--checkpoint_path', type=str, required=True,
+                        help='Path to the checkpoint file')
+    parser.add_argument('--output_csv', type=str, required=True,
+                        help='Path to output CSV file for results')
     
-    # Run inference and get metrics
-    metrics = run_inference_on_checkpoint(checkpoint_info, args)
+    args = parser.parse_args()
+    
+    # Check GPU availability and memory
+    if torch.cuda.is_available():
+        print(f"Using GPU: {torch.cuda.get_device_name()}")
+        print(f"GPU Memory: {torch.cuda.get_device_properties(0).total_memory / 1e9:.1f} GB")
+        print(f"Available GPU Memory: {torch.cuda.memory_reserved(0) / 1e9:.1f} GB")
+    else:
+        print("Warning: CUDA not available, using CPU (will be very slow)")
+    
+    # Load checkpoint and extract metadata
+    print(f"Processing checkpoint: {args.checkpoint_path}")
+    checkpoint = torch.load(args.checkpoint_path, map_location=device)
+    
+    # Extract metadata from checkpoint
+    latent_vectors = checkpoint['latent_vectors']
+    train_data_path = checkpoint['train_data_path']
+    decoder_mode = checkpoint['decoder_mode']
+    
+    # Extract the parent folder name one above 'train_meshes'
+    folder_name = os.path.basename(os.path.dirname(train_data_path))
+    if 'mixed' in folder_name:
+        split_type = 'mixed'
+    elif 'separate' in folder_name:
+        split_type = 'separate'
+    else:
+        split_type = None
+
+    if 'global' in folder_name:
+        scaling_type = 'global'
+    elif 'individual' in folder_name:
+        scaling_type = 'individual'
+    else:
+        scaling_type = None
+
+    if 'noaug' in folder_name:
+        augmentation_type = 'noaug'
+    elif 'aug' in folder_name:
+        augmentation_type = 'aug'
+    else:
+        augmentation_type = None
+
+    if isinstance(latent_vectors, torch.nn.Embedding):
+        latent_dim = latent_vectors.weight.shape[1]
+    else:
+        latent_dim = None
+
+    print(f"Config: {split_type}_{scaling_type}_{augmentation_type}, decoder: {decoder_mode}, latent: {latent_dim}")
+    
+    # Create checkpoint info
+    checkpoint_info = {
+        "DALS_path": args.checkpoint_path,
+        "split_type": split_type,
+        "augmentation_type": augmentation_type,
+        "scaling_type": scaling_type,
+        "decoder_mode": decoder_mode,
+        "latent_dim": latent_dim,
+        "train_data_path": train_data_path
+    }
+    
+    # Run inference
+    inference_args = get_inference_args()
+    metrics = run_inference_on_checkpoint(checkpoint_info, inference_args)
     
     if metrics is not None:
         # Update checkpoint info with metrics
@@ -405,42 +526,45 @@ for idx, checkpoint_info in enumerate(results):
             'BL quality_mean': None,
             'BL quality_std': None,
         })
-
-# Define extended CSV columns
-csv_columns_extended = [
-    "DALS_path", "split_type", "augmentation_type", "scaling_type", "decoder_mode", "latent_dim",
-    "ChamferL2 x 10000_mean", "ChamferL2 x 10000_std",
-    "BL quality_mean", "BL quality_std", 
-    "No. ints._mean", "No. ints._std",
-    "Precision@0.01_mean", "Precision@0.01_std",
-    "Recall@0.01_mean", "Recall@0.01_std", 
-    "F1@0.01_mean", "F1@0.01_std",
-    "Precision@0.02_mean", "Precision@0.02_std",
-    "Recall@0.02_mean", "Recall@0.02_std",
-    "F1@0.02_mean", "F1@0.02_std",
-    "Search_mean", "Search_std",
-    "Total_mean", "Total_std",
-    "num_test_samples"
-]
-
-# Write final CSV with all results
-csv_filename = "model_inference_summary.csv"
-print(f"\n{'='*80}")
-print(f"Saving results to {csv_filename}")
-print(f"{'='*80}\n")
-
-with open(csv_filename, mode='w', newline='') as csv_file:
-    writer = csv.DictWriter(csv_file, fieldnames=csv_columns_extended)
-    writer.writeheader()
-    for row in results:
+    
+    # Define CSV columns
+    csv_columns = [
+        "DALS_path", "split_type", "augmentation_type", "scaling_type", "decoder_mode", "latent_dim",
+        "ChamferL2 x 10000_mean", "ChamferL2 x 10000_std",
+        "BL quality_mean", "BL quality_std", 
+        "No. ints._mean", "No. ints._std",
+        "Precision@0.01_mean", "Precision@0.01_std",
+        "Recall@0.01_mean", "Recall@0.01_std", 
+        "F1@0.01_mean", "F1@0.01_std",
+        "Precision@0.02_mean", "Precision@0.02_std",
+        "Recall@0.02_mean", "Recall@0.02_std",
+        "F1@0.02_mean", "F1@0.02_std",
+        "Search_mean", "Search_std",
+        "Total_mean", "Total_std",
+        "num_test_samples"
+    ]
+    
+    # Write results to CSV
+    print(f"Writing results to: {args.output_csv}")
+    with open(args.output_csv, mode='w', newline='') as csv_file:
+        writer = csv.DictWriter(csv_file, fieldnames=csv_columns)
+        writer.writeheader()
+        
         # Clean the row data to handle None values and ensure all fields are present
         cleaned_row = {}
-        for field in csv_columns_extended:
-            if field in row and row[field] is not None:
-                cleaned_row[field] = row[field]
+        for field in csv_columns:
+            if field in checkpoint_info and checkpoint_info[field] is not None:
+                cleaned_row[field] = checkpoint_info[field]
             else:
                 cleaned_row[field] = ''  # Use empty string for missing/None values
         writer.writerow(cleaned_row)
+    
+    print(f"Successfully saved inference results to {args.output_csv}")
+    
+    # Final GPU cleanup
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        print(f"Final GPU Memory Usage: {torch.cuda.memory_allocated(0) / 1e9:.1f} GB")
 
-print(f"Successfully saved inference results for {len(results)} checkpoints to {csv_filename}")
-print("All done. Exiting")
+if __name__ == "__main__":
+    main()
