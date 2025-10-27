@@ -2,8 +2,8 @@
 
 # Configuration
 # DATA_PATH="/home/ralbe/pyhppc_project/cirr_segm_clean/augmented_meshes"
-TRAIN_DATA_PATH="/home/ralbe/pyhppc_project/cirr_segm_clean/healthy_T1_meshes"
-VAL_DATA_PATH="/home/ralbe/pyhppc_project/cirr_segm_clean/healthy_T1_meshes"
+TRAIN_DATA_PATH="/home/ralbe/DALS/mesh_autodecoder/data/train_meshes"
+VAL_DATA_PATH="/home/ralbe/DALS/mesh_autodecoder/data/test_meshes"
 # 
 NUM_VAL_SAMPLES=1
 NUM_AUGMENT=0
@@ -16,8 +16,8 @@ MODEL="mesh_decoder"
 # Submit one job per decoder model
 echo "Submitting job for $MODEL..."
 sbatch --job-name="${MODEL}" \
-        --output="${MODEL}.out" \
-        --error="${MODEL}.err" \
+        --output="aug_cirr_${MODEL}.out" \
+        --error="aug_cirr_${MODEL}.err" \
         --time=24:00:00 \
         --partition=titans \
         --gres=gpu:1 \
@@ -33,7 +33,7 @@ sbatch --job-name="${MODEL}" \
                     --num_augment $NUM_AUGMENT \
                     --data_random_seed $DATA_RANDOM_SEED \
                     mesh_decoder \
-                    --latent_features 512 \
+                    --latent_features 128 \
                     --hidden_features 724 724 362 \
                     --decoder_mode gcnn \
                     --encoding none \

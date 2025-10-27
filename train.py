@@ -31,6 +31,14 @@ def train_mesh_decoder(args):
     print('Loading data...')
     train_data = load_meshes_in_dir(args.train_data_path)
     val_data = load_meshes_in_dir(args.val_data_path)
+    
+    # Get training filenames for saving in checkpoint
+    import glob
+    import os
+    train_filenames = sorted(glob.glob(os.path.join(args.train_data_path, '*.obj')))
+    train_filenames = [os.path.basename(fname) for fname in train_filenames]
+    print(f'Found {len(train_filenames)} training filenames')
+    
     t_load = time() - t_load
     print(f'Loaded data in {t_load:.2f} seconds')
 
@@ -56,9 +64,10 @@ def train_mesh_decoder(args):
 
     # Train network
     trainer = MeshDecoderTrainer(log_wandb=(not args.no_wandb), **vars(args))
-    # Store data paths for checkpoint saving
+    # Store data paths and filenames for checkpoint saving
     trainer.train_data_path = args.train_data_path
     trainer.val_data_path = args.val_data_path
+    trainer.train_filenames = train_filenames
     trainer.train(train_data, val_data)
 
 

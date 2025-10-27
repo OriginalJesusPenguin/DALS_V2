@@ -130,3 +130,140 @@ def mesh_laplacian_loss_highdim(meshes, vert_features, p=2):
     # loss = torch.sum(loss ** 2)
 
     return loss
+
+
+def mesh_jacobian_determinant_loss(template_meshes, deformed_meshes, eps=1e-8):
+    """
+    Compute Jacobian determinant loss to prevent self-intersections.
+    
+    This loss penalizes local deformations that flip orientation (det(J) < 0),
+    which is associated with self-intersections in mesh deformation.
+    
+    The Jacobian is computed for each face by looking at how the face deforms.
+    For triangular faces, we compute the 2x2 Jacobian in the local face plane.
+    
+    Args:
+        template_meshes: Meshes object with original/template vertices.
+        deformed_meshes: Meshes object with deformed vertices.
+        eps: Small constant for numerical stability.
+        
+    Returns:
+        loss: Scalar loss value penalizing negative Jacobian determinants.
+    """
+    if len(template_meshes) == 0 or len(deformed_meshes) == 0:
+        return torch.tensor(0.0, dtype=torch.float32, device=template_meshes.device)
+    
+    template_verts = template_meshes.verts_packed()  # (N, 3)
+    deformed_verts = deformed_meshes.verts_packed()  # (N, 3)
+    
+    # Get face connectivity
+    faces = template_meshes.faces_packed()  # (F, 3)
+    
+    if faces.shape[0] == 0:
+        return torch.tensor(0.0, dtype=torch.float32, device=template_meshes.device)
+    
+    # Get vertex positions for each face
+    # Template vertices
+    v0_template = template_verts[faces[:, 0]]  # (F, 3)
+    v1_template = template_verts[faces[:, 1]]  # (F, 3)
+    v2_template = template_verts[faces[:, 2]]  # (F, 3)
+    
+    # Deformed vertices
+    v0_deformed = deformed_verts[faces[:, 0]]  # (F, 3)
+    v1_deformed = deformed_verts[faces[:, 1]]  # (F, 3)
+    v2_deformed = deformed_verts[faces[:, 2]]  # (F, 3)
+    
+    # Compute edge vectors in template (local basis)
+    e1_template = v1_template - v0_template  # (F, 3)
+    e2_template = v2_template - v0_template  # (F, 3)
+    
+    # Compute edge vectors in deformed mesh
+    e1_deformed = v1_deformed - v0_deformed  # (F, 3)
+    e2_deformed = v2_deformed - v0_deformed  # (F, 3)
+    
+    # Compute face normals (used as third basis vector)
+    # Template normal
+    n_template = torch.cross(e1_template, e2_template, dim=1)  # (F, 3)
+    n_template_norm = torch.norm(n_template, dim=1, keepdim=True) + eps
+    n_template = n_template / n_template_norm  # (F, 3)
+    
+    # Deformed normal
+    n_deformed = torch.cross(e1_deformed, e2_deformed, dim=1)  # (F, 3)
+    n_deformed_norm = torch.norm(n_deformed, dim=1, keepdim=True) + eps
+    n_deformed = n_deformed / n_deformed_norm  # (F, 3)
+    
+    # Project edges onto face plane (for computing in-plane Jacobian)
+    # For 2D Jacobian in the face plane, we need to project onto local 2D coordinates
+    # Build local orthonormal basis for each face
+    
+    # Basis 1: normalized e1
+    basis1_template = e1_template / (torch.norm(e1_template, dim=1, keepdim=True) + eps)  # (F, 3)
+    
+    # Basis 2: e2 projected onto plane perpendicular to basis1
+    # Gram-Schmidt process
+    proj = torch.sum(e2_template * basis1_template, dim=1, keepdim=True)  # (F, 1)
+    basis2_template = e2_template - proj * basis1_template  # (F, 3)
+    basis2_template = basis2_template / (torch.norm(basis2_template, dim=1, keepdim=True) + eps)  # (F, 3)
+    
+    # Same for deformed
+    basis1_deformed = e1_deformed / (torch.norm(e1_deformed, dim=1, keepdim=True) + eps)  # (F, 3)
+    proj = torch.sum(e2_deformed * basis1_deformed, dim=1, keepdim=True)  # (F, 1)
+    basis2_deformed = e2_deformed - proj * basis1_deformed  # (F, 3)
+    basis2_deformed = basis2_deformed / (torch.norm(basis2_deformed, dim=1, keepdim=True) + eps)  # (F, 3)
+    
+    # Project edges onto local 2D coordinates
+    e1_2d_template = torch.stack([
+        torch.sum(e1_template * basis1_template, dim=1),  # (F,)
+        torch.sum(e1_template * basis2_template, dim=1)    # (F,)
+    ], dim=1)  # (F, 2)
+    
+    e2_2d_template = torch.stack([
+        torch.sum(e2_template * basis1_template, dim=1),  # (F,)
+        torch.sum(e2_template * basis2_template, dim=1)    # (F,)
+    ], dim=1)  # (F, 2)
+    
+    e1_2d_deformed = torch.stack([
+        torch.sum(e1_deformed * basis1_deformed, dim=1),  # (F,)
+        torch.sum(e1_deformed * basis2_deformed, dim=1)    # (F,)
+    ], dim=1)  # (F, 2)
+    
+    e2_2d_deformed = torch.stack([
+        torch.sum(e2_deformed * basis1_deformed, dim=1),  # (F,)
+        torch.sum(e2_deformed * basis2_deformed, dim=1)    # (F,)
+    ], dim=1)  # (F, 2)
+    
+    # Stack to form 2x2 Jacobian matrices for each face
+    # J = [deformed_edges] @ inv([template_edges])
+    # For numerical stability, compute using cross products in 2D
+    # 
+    # For each face i, we have:
+    # J_i = [e1_deformed_i  e2_deformed_i] @ inv([e1_template_i  e2_template_i])
+    # 
+    # We can compute the determinant of J directly using:
+    # det(J) = det([deformed]) / det([template])
+    # 
+    # For 2x2 matrices [a b; c d], det = ad - bc
+    
+    # Compute determinant of template edges (denominator)
+    # det_template = e1_template_x * e2_template_y - e1_template_y * e2_template_x
+    det_template = e1_2d_template[:, 0] * e2_2d_template[:, 1] - \
+                   e1_2d_template[:, 1] * e2_2d_template[:, 0]
+    det_template = det_template + eps  # Avoid division by zero
+    
+    # Compute determinant of deformed edges (numerator)
+    det_deformed = e1_2d_deformed[:, 0] * e2_2d_deformed[:, 1] - \
+                   e1_2d_deformed[:, 1] * e2_2d_deformed[:, 0]
+    
+    # Compute ratio
+    all_dets = det_deformed / det_template
+    
+    # Penalize negative determinants (orientation flips)
+    # Using ReLU to only penalize negative values
+    neg_loss = torch.relu(-all_dets)
+    
+    # Also add a small penalty for very large determinants (extreme scaling)
+    max_det = torch.relu(all_dets - 1.0)  # Penalize det > 1.0
+    
+    loss = neg_loss.mean() + 0.1 * max_det.mean()
+    
+    return loss

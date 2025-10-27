@@ -997,6 +997,7 @@ class MeshDecoderTrainer:
             # Add specific parameters for easy retrieval
             'train_data_path': getattr(self, 'train_data_path', None),
             'val_data_path': getattr(self, 'val_data_path', None),
+            'train_filenames': getattr(self, 'train_filenames', None),
             'latent_features': self.latent_features,
             'decoder_mode': self.decoder_mode,
         }
@@ -1029,6 +1030,9 @@ class MeshDecoderTrainer:
         self.best_epoch = state['best_epoch']
         self.best_loss = state['best_loss']
         self.best_epoch_losses = state['best_epoch_losses']
+        # Load training filenames if available
+        if 'train_filenames' in state:
+            self.train_filenames = state['train_filenames']
         if self.profiling and 'profile_times' in state:
             self.profile_times = state['profile_times']
         return epoch

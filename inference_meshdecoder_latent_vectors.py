@@ -33,7 +33,7 @@ import pytorch3d.utils
 from augment.point_wolf import augment_meshes
 from util.data import load_meshes_in_dir
 from model.mesh_decoder import MeshDecoder
-from model.loss import mesh_bl_quality_loss, mesh_edge_loss_highdim, mesh_laplacian_loss_highdim, mesh_jacobian_determinant_loss
+from model.loss import mesh_bl_quality_loss, mesh_edge_loss_highdim, mesh_laplacian_loss_highdim
 
 # Try importing metrics and remesh
 try:
@@ -73,10 +73,10 @@ def get_inference_args():
     args = Args()
     args.latent_mode = "local" 
     args.lr = 1e-3  # Increased learning rate for better optimization
-    args.num_point_samples = 15_000  # Increased to 15k
+    args.num_point_samples = 5_000  # Increased to 15k
     args.point_sample_mode = "fps"
-    args.max_iters = 3000  # Fixed iterations with learning rate reduction
-    args.template_subdiv = 4  
+    args.max_iters = 500  # Fixed iterations with learning rate reduction
+    args.template_subdiv = 3  # Keep at 3
     args.remesh_with_forward_at_end = False
     args.remesh_at_end = False
     args.remesh_at = []
@@ -84,7 +84,6 @@ def get_inference_args():
     args.weight_bl_quality_loss = 1e-3
     args.weight_edge_length_loss = 1e-2  # Edge length regularization
     args.weight_laplacian_loss = 2e-3    # Laplacian regularization (separate weight)
-    args.weight_jacobian_det_loss = 1e-3  # Jacobian determinant loss to prevent self-intersections
     args.batch_size = 16  # Process multiple meshes in parallel
     args.init_strategy = "mean"  # Options: "random", "mean", "zero"
     return args
@@ -158,6 +157,11 @@ def run_inference_on_checkpoint(checkpoint_info, args):
     os.makedirs(mesh_output_dir, exist_ok=True)
     print(f'Created mesh output directory: {mesh_output_dir}')
     
+    # Create output directory for latent vectors
+    latent_output_dir = f'inference_results/latents_{model_name}'
+    os.makedirs(latent_output_dir, exist_ok=True)
+    print(f'Created latent vectors output directory: {latent_output_dir}')
+    
     if len(meshes) == 0:
         print("Warning: No test meshes found")
         return None
@@ -174,6 +178,7 @@ def run_inference_on_checkpoint(checkpoint_info, args):
     
     # Run inference
     all_metrics = []
+    all_latent_data = []
     print('Running inference...')
     
     if args.latent_mode == 'global':
@@ -300,7 +305,6 @@ def run_inference_on_checkpoint(checkpoint_info, args):
             
             search_template = pytorch3d.utils.ico_sphere(args.template_subdiv, device=device)
             search_template.scale_verts_(0.1)
-            
             lv = latent_vectors.weight.data.mean(dim=0).clone().to(device).unsqueeze(0)
             lv = lv.repeat(len(search_template.verts_packed()), 1)
             lv.requires_grad_(True)
@@ -328,10 +332,6 @@ def run_inference_on_checkpoint(checkpoint_info, args):
                 loss += args.weight_bl_quality_loss * mesh_bl_quality_loss(pred_mesh)
                 loss += args.weight_edge_length_loss * mesh_edge_loss_highdim(pred_mesh, lv)
                 loss += args.weight_laplacian_loss * mesh_laplacian_loss_highdim(pred_mesh, lv)
-                # Note: We use search_template (current template) for Jacobian loss,
-                # not original_template, because remeshing changes the mesh topology
-                # The Jacobian measures local deformation from current template to current prediction
-                loss += args.weight_jacobian_det_loss * mesh_jacobian_determinant_loss(search_template, pred_mesh)
                 loss.backward()
                 
                 # Gradient clipping for stability
@@ -411,9 +411,21 @@ def run_inference_on_checkpoint(checkpoint_info, args):
             if save_mesh_to_obj(true_mesh, target_path):
                 print(f'Saved target mesh {i+1}/{len(meshes)}: {target_filename}')
             
+            # Collect the optimized latent vector
+            all_latent_data.append({
+                'test_filename': mesh_filenames[i],
+                'latent_vectors': best_lv.detach().cpu()  # Shape: [num_vertices, latent_dim]
+            })
+            
             # Clear GPU cache to prevent memory buildup
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
+    
+    # Save all latent vectors to single file
+    if all_latent_data:
+        latent_save_path = os.path.join(latent_output_dir, 'all_latent_vectors.pt')
+        torch.save(all_latent_data, latent_save_path)
+        print(f'Saved latent vectors for {len(all_latent_data)} test samples to {latent_save_path}')
     
     # Aggregate metrics
     if len(all_metrics) == 0:
@@ -439,7 +451,7 @@ def run_inference_on_checkpoint(checkpoint_info, args):
     saved_meshes = [f for f in os.listdir(mesh_output_dir) if f.endswith('.obj')]
     optimized_count = len([f for f in saved_meshes if f.startswith('optimized_')])
     target_count = len([f for f in saved_meshes if f.startswith('target_')])
-    print(f'Saved {optimized_count} optimized meshes and {target_count} target meshes to {mesh_output_dir}')
+    print(f'Saved {optimized_count} optimized meshes, {target_count} target meshes, and latent vectors to {latent_output_dir}')
     
     return aggregated_metrics
 
