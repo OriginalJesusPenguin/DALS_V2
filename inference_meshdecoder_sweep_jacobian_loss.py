@@ -9,7 +9,6 @@ import os
 import csv
 import sys
 import numpy as np
-import argparse
 from time import time
 from glob import glob
 from os.path import join, basename
@@ -82,12 +81,38 @@ def get_inference_args():
     args.remesh_at = []
     args.train_test_split_idx = 0
     args.weight_bl_quality_loss = 1e-3
-    args.weight_edge_length_loss = 1e-2  # Edge length regularization
+    args.weight_edge_length_loss = 1e-1  # Edge length regularization
     args.weight_laplacian_loss = 2e-3    # Laplacian regularization 
     args.weight_jacobian_det_loss = 5e-4 # Jacobian determinant loss to prevent self-intersections
     args.batch_size = 16  # Process multiple meshes in parallel
-    args.init_strategy = "mean"  # Options: "random", "mean", "zero"
     return args
+
+
+def format_scientific(value):
+    if value is None:
+        return "na"
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return str(value)
+    if numeric == 0.0:
+        return "0"
+    formatted = f"{numeric:.0e}"
+    base, exponent = formatted.split("e")
+    exponent_int = int(exponent)
+    return f"{base}e{exponent_int}"
+
+
+def extract_training_edge_weight(checkpoint):
+    for key in ("weight_edge_loss", "weight_edge_length_loss"):
+        if key in checkpoint:
+            return checkpoint[key]
+    hparams = checkpoint.get('hparams')
+    if isinstance(hparams, dict):
+        for key in ("weight_edge_loss", "weight_edge_length_loss"):
+            if key in hparams:
+                return hparams[key]
+    return None
 
 def save_mesh_to_obj(mesh, filepath):
     """Save a PyTorch3D mesh to OBJ file"""
@@ -107,7 +132,7 @@ def save_mesh_to_obj(mesh, filepath):
         return False
 
 # Function to run inference on a single checkpoint
-def run_inference_on_checkpoint(checkpoint_info, args):
+def run_inference_on_checkpoint(checkpoint_info, args, mesh_output_dir):
     """Run inference on a single checkpoint and return aggregated metrics"""
     
     # Load checkpoint
@@ -152,9 +177,6 @@ def run_inference_on_checkpoint(checkpoint_info, args):
     print(f'Processing all {len(meshes)} test samples')
     
     # Create output directory for saved meshes
-    model_name = os.path.basename(checkpoint_path).replace('.ckpt', '')
-    # model_name = '/home/ralbe/DALS/mesh_autodecoder/models/MeshDecoderTrainer_2025-10-23_14-01-45.ckpt'
-    mesh_output_dir = f'inference_results/meshes_{model_name}'
     os.makedirs(mesh_output_dir, exist_ok=True)
     print(f'Created mesh output directory: {mesh_output_dir}')
     
@@ -181,15 +203,8 @@ def run_inference_on_checkpoint(checkpoint_info, args):
             true_mesh = true_mesh.to(device)
             true_points = sample_points_from_meshes(true_mesh, args.num_point_samples)
             
-            # Initialize latent vector based on strategy
-            if args.init_strategy == "random":
-                lv = torch.randn(1, latent_vectors.weight.shape[1], device=device) * 0.1
-            elif args.init_strategy == "mean":
-                lv = latent_vectors.weight.data.mean(dim=0).clone().to(device).unsqueeze(0)
-            elif args.init_strategy == "zero":
-                lv = torch.zeros(1, latent_vectors.weight.shape[1], device=device)
-            else:
-                lv = torch.randn(1, latent_vectors.weight.shape[1], device=device) * 0.1
+            # Initialize latent vector from the mean embedding
+            lv = latent_vectors.weight.data.mean(dim=0).clone().to(device).unsqueeze(0)
             lv.requires_grad_(True)
             optim = torch.optim.Adam([lv], lr=args.lr)
             search_template = pytorch3d.utils.ico_sphere(args.template_subdiv, device=device)
@@ -444,105 +459,86 @@ def run_inference_on_checkpoint(checkpoint_info, args):
     return aggregated_metrics
 
 def main():
-    parser = argparse.ArgumentParser(description='Run inference on a single model checkpoint')
-    parser.add_argument('--checkpoint_path', type=str, required=True,
-                        help='Path to the checkpoint file')
-    parser.add_argument('--output_csv', type=str, required=True,
-                        help='Path to output CSV file for results')
-    
-    args = parser.parse_args()
-    
-    # Check GPU availability and memory
+    checkpoint_path = "/home/ralbe/DALS/mesh_autodecoder/models/MeshDecoderTrainer_2025-10-30_14-01-54.ckpt"
+    inference_edge_weight = 1e-1
+    sweep_weights = [1e-4, 5e-4, 1e-3, 5e-3, 1e-2, 5e-2, 1e-1]
+    base_output_dir = "/home/ralbe/DALS/mesh_autodecoder/inference_results"
+
+    if not os.path.exists(checkpoint_path):
+        print(f"Checkpoint not found: {checkpoint_path}")
+        return
+
     if torch.cuda.is_available():
         print(f"Using GPU: {torch.cuda.get_device_name()}")
         print(f"GPU Memory: {torch.cuda.get_device_properties(0).total_memory / 1e9:.1f} GB")
         print(f"Available GPU Memory: {torch.cuda.memory_reserved(0) / 1e9:.1f} GB")
     else:
         print("Warning: CUDA not available, using CPU (will be very slow)")
-    
-    # Load checkpoint and extract metadata
-    print(f"Processing checkpoint: {args.checkpoint_path}")
-    checkpoint = torch.load(args.checkpoint_path, map_location=device)
-    
-    # Extract metadata from checkpoint
-    latent_vectors = checkpoint['latent_vectors']
-    train_data_path = checkpoint['train_data_path']
-    decoder_mode = checkpoint['decoder_mode']
-    
-    # Extract the parent folder name one above 'train_meshes'
-    folder_name = os.path.basename(os.path.dirname(train_data_path))
-    if 'mixed' in folder_name:
-        split_type = 'mixed'
-    elif 'separate' in folder_name:
-        split_type = 'separate'
-    else:
-        split_type = None
 
-    if 'global' in folder_name:
-        scaling_type = 'global'
-    elif 'individual' in folder_name:
-        scaling_type = 'individual'
-    else:
-        scaling_type = None
+    os.makedirs(base_output_dir, exist_ok=True)
 
-    if 'noaug' in folder_name:
-        augmentation_type = 'noaug'
-    elif 'aug' in folder_name:
-        augmentation_type = 'aug'
-    else:
-        augmentation_type = None
+    print(f"\nProcessing checkpoint: {checkpoint_path}")
+    checkpoint = torch.load(checkpoint_path, map_location=device)
 
-    if isinstance(latent_vectors, torch.nn.Embedding):
-        latent_dim = latent_vectors.weight.shape[1]
-    else:
-        latent_dim = None
+    latent_vectors = checkpoint.get('latent_vectors')
+    train_data_path = checkpoint.get('train_data_path')
+    decoder_mode = checkpoint.get('decoder_mode')
 
-    print(f"Config: {split_type}_{scaling_type}_{augmentation_type}, decoder: {decoder_mode}, latent: {latent_dim}")
-    
-    # Create checkpoint info
-    checkpoint_info = {
-        "DALS_path": args.checkpoint_path,
+    folder_name = os.path.basename(os.path.dirname(train_data_path)) if train_data_path else ''
+    split_type = None
+    scaling_type = None
+    augmentation_type = None
+
+    if folder_name:
+        if 'mixed' in folder_name:
+            split_type = 'mixed'
+        elif 'separate' in folder_name:
+            split_type = 'separate'
+
+        if 'global' in folder_name:
+            scaling_type = 'global'
+        elif 'individual' in folder_name:
+            scaling_type = 'individual'
+
+        if 'noaug' in folder_name:
+            augmentation_type = 'noaug'
+        elif 'aug' in folder_name:
+            augmentation_type = 'aug'
+
+    latent_dim = checkpoint.get('latent_dim')
+    if latent_dim is None:
+        if isinstance(latent_vectors, torch.nn.Embedding):
+            latent_dim = latent_vectors.weight.shape[1]
+        elif hasattr(latent_vectors, 'weight') and latent_vectors.weight is not None:
+            latent_dim = latent_vectors.weight.shape[1]
+
+    train_edge_weight = extract_training_edge_weight(checkpoint)
+
+    base_info = {
+        "DALS_path": checkpoint_path,
         "split_type": split_type,
         "augmentation_type": augmentation_type,
         "scaling_type": scaling_type,
         "decoder_mode": decoder_mode,
         "latent_dim": latent_dim,
-        "train_data_path": train_data_path
+        "train_data_path": train_data_path,
+        "train_weight_edge_loss": train_edge_weight,
     }
-    
-    # Run inference
-    inference_args = get_inference_args()
-    metrics = run_inference_on_checkpoint(checkpoint_info, inference_args)
-    
-    if metrics is not None:
-        # Update checkpoint info with metrics
-        checkpoint_info.update(metrics)
-        print(f"Successfully processed {checkpoint_info['num_test_samples']} test samples")
-        
-        # Print some key metrics
-        if 'ChamferL2 x 10000_mean' in metrics:
-            print(f"ChamferL2: {metrics['ChamferL2 x 10000_mean']:.4f} ± {metrics['ChamferL2 x 10000_std']:.4f}")
-        if 'BL quality_mean' in metrics:
-            print(f"BL Quality: {metrics['BL quality_mean']:.4f} ± {metrics['BL quality_std']:.4f}")
-    else:
-        print("Failed to process this checkpoint")
-        # Add placeholder metrics
-        checkpoint_info.update({
-            'num_test_samples': 0,
-            'ChamferL2 x 10000_mean': None,
-            'ChamferL2 x 10000_std': None,
-            'BL quality_mean': None,
-            'BL quality_std': None,
-        })
-    
-    # Define CSV columns
+
+    config_desc = f"{split_type}_{scaling_type}_{augmentation_type}"
+    print(f"Config: {config_desc}, decoder: {decoder_mode}, latent: {latent_dim}")
+
+    del checkpoint
+
     csv_columns = [
         "DALS_path", "split_type", "augmentation_type", "scaling_type", "decoder_mode", "latent_dim",
+        "train_weight_edge_loss", "inference_weight_edge_loss",
+        "weight_jacobian_det_loss", "weight_bl_quality_loss",
         "ChamferL2 x 10000_mean", "ChamferL2 x 10000_std",
-        "BL quality_mean", "BL quality_std", 
+        "BL quality_mean", "BL quality_std",
         "No. ints._mean", "No. ints._std",
         "Precision@0.01_mean", "Precision@0.01_std",
-        "Recall@0.01_mean", "Recall@0.01_std", 
+        "Recall@0.01_mean", "Recall@0.01_std",
         "F1@0.01_mean", "F1@0.01_std",
         "Precision@0.02_mean", "Precision@0.02_std",
         "Recall@0.02_mean", "Recall@0.02_std",
@@ -551,25 +547,107 @@ def main():
         "Total_mean", "Total_std",
         "num_test_samples"
     ]
-    
-    # Write results to CSV
-    print(f"Writing results to: {args.output_csv}")
-    with open(args.output_csv, mode='w', newline='') as csv_file:
-        writer = csv.DictWriter(csv_file, fieldnames=csv_columns)
-        writer.writeheader()
-        
-        # Clean the row data to handle None values and ensure all fields are present
-        cleaned_row = {}
-        for field in csv_columns:
-            if field in checkpoint_info and checkpoint_info[field] is not None:
-                cleaned_row[field] = checkpoint_info[field]
-            else:
-                cleaned_row[field] = ''  # Use empty string for missing/None values
-        writer.writerow(cleaned_row)
-    
-    print(f"Successfully saved inference results to {args.output_csv}")
-    
-    # Final GPU cleanup
+
+    train_weight_str = format_scientific(train_edge_weight)
+    latent_str = str(latent_dim) if latent_dim is not None else "unknown"
+    inference_edge_weight_str = format_scientific(inference_edge_weight)
+
+    all_combos = [(jac, bl) for jac in sweep_weights for bl in sweep_weights]
+    combos_to_run = []
+
+    for jac_weight, bl_weight in all_combos:
+        jac_weight_str = format_scientific(jac_weight)
+        bl_weight_str = format_scientific(bl_weight)
+        folder_prefix = (
+            f"meshes_tr_{train_weight_str}_edge_{inference_edge_weight_str}_"
+            f"jac_{jac_weight_str}_bl_{bl_weight_str}_{latent_str}"
+        )
+        candidate_dirs = glob(os.path.join(base_output_dir, folder_prefix + '*'))
+
+        processed = False
+        for candidate in candidate_dirs:
+            csv_candidate = os.path.join(
+                candidate,
+                os.path.basename(candidate).replace("meshes_", "metrics_", 1) + ".csv",
+            )
+            if os.path.isfile(csv_candidate) and os.path.getsize(csv_candidate) > 0:
+                processed = True
+                break
+
+        if not processed:
+            combos_to_run.append((jac_weight, bl_weight))
+
+    if not combos_to_run:
+        print("All combinations already processed. Nothing to run.")
+        return
+
+    print(f"Pending combinations: {len(combos_to_run)}")
+    print("  " + ", ".join(
+        [f"jac={format_scientific(j)}, bl={format_scientific(b)}" for j, b in combos_to_run]
+    ))
+
+    for jac_weight, bl_weight in combos_to_run:
+        inference_args = get_inference_args()
+        inference_args.weight_edge_length_loss = inference_edge_weight
+        inference_args.weight_jacobian_det_loss = jac_weight
+        inference_args.weight_bl_quality_loss = bl_weight
+
+        jac_weight_str = format_scientific(jac_weight)
+        bl_weight_str = format_scientific(bl_weight)
+
+        folder_base = (
+            f"meshes_tr_{train_weight_str}_edge_{inference_edge_weight_str}_"
+            f"jac_{jac_weight_str}_bl_{bl_weight_str}_{latent_str}"
+        )
+        mesh_output_dir = os.path.join(base_output_dir, folder_base)
+        os.makedirs(mesh_output_dir, exist_ok=True)
+
+        print(
+            "Running inference with "
+            f"edge={inference_edge_weight:.1e}, jac={jac_weight:.1e}, bl={bl_weight:.1e}"
+        )
+
+        metrics = run_inference_on_checkpoint(base_info, inference_args, mesh_output_dir)
+
+        run_info = dict(base_info)
+        run_info["train_weight_edge_loss"] = train_weight_str
+        run_info["inference_weight_edge_loss"] = inference_edge_weight_str
+        run_info["weight_jacobian_det_loss"] = jac_weight_str
+        run_info["weight_bl_quality_loss"] = bl_weight_str
+
+        if metrics is not None:
+            run_info.update(metrics)
+            print(f"Successfully processed {run_info['num_test_samples']} test samples")
+            if 'ChamferL2 x 10000_mean' in metrics:
+                print(f"ChamferL2: {metrics['ChamferL2 x 10000_mean']:.4f} ± {metrics['ChamferL2 x 10000_std']:.4f}")
+            if 'BL quality_mean' in metrics:
+                print(f"BL Quality: {metrics['BL quality_mean']:.4f} ± {metrics['BL quality_std']:.4f}")
+        else:
+            print("Failed to process this configuration")
+            run_info.update({
+                'num_test_samples': 0,
+                'ChamferL2 x 10000_mean': None,
+                'ChamferL2 x 10000_std': None,
+                'BL quality_mean': None,
+                'BL quality_std': None,
+            })
+
+        csv_base = folder_base.replace("meshes_", "metrics_", 1)
+        csv_filename = f"{csv_base}.csv"
+        csv_path = os.path.join(mesh_output_dir, csv_filename)
+        print(f"Writing results to: {csv_path}")
+        with open(csv_path, mode='w', newline='') as csv_file:
+            writer = csv.DictWriter(csv_file, fieldnames=csv_columns)
+            writer.writeheader()
+
+            cleaned_row = {}
+            for field in csv_columns:
+                value = run_info.get(field)
+                cleaned_row[field] = value if value is not None else ''
+            writer.writerow(cleaned_row)
+
+        print(f"Successfully saved inference results to {csv_path}")
+
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
         print(f"Final GPU Memory Usage: {torch.cuda.memory_allocated(0) / 1e9:.1f} GB")

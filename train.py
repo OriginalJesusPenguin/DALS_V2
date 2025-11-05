@@ -17,6 +17,36 @@ from augment.point_wolf import augment_meshes, augment_points
 
 
 def train_mesh_decoder(args):
+    # Verify CUDA before doing anything
+    
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    print(f"Requested device: {device}")
+    if args.device == 'cuda':
+        if not torch.cuda.is_available():
+            print("ERROR: CUDA is not available but --device cuda was requested!")
+            print("Available devices:", torch.cuda.device_count())
+            print("Exiting...")
+            sys.exit(1)
+        
+        # Get the GPU that SLURM allocated
+        import os
+        if 'CUDA_VISIBLE_DEVICES' in os.environ:
+            cuda_visible = os.environ['CUDA_VISIBLE_DEVICES']
+            print(f"CUDA_VISIBLE_DEVICES={cuda_visible}")
+        
+        # Force CUDA initialization
+        try:
+            test_tensor = torch.zeros(1).cuda()
+            print(f"✓ CUDA initialized successfully")
+            print(f"✓ GPU: {torch.cuda.get_device_name(0)}")
+            print(f"✓ Total GPUs: {torch.cuda.device_count()}")
+        except RuntimeError as e:
+            print(f"ERROR: CUDA initialization failed: {e}")
+            print("Exiting...")
+            sys.exit(1)
+    else:
+        print(f"Using device: {args.device}")
+    
     # Start logging
     if not args.no_wandb:
         wandb.init(

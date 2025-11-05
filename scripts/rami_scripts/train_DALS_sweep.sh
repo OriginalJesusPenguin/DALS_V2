@@ -1,12 +1,15 @@
 #!/bin/bash
 
-# Configuration
-BASE_DATA_PATH="/home/ralbe/pyhppc_project/cirr_segm_clean/meshes_decathlon2"
+# Fixed paths
+TRAIN_DATA_PATH="/home/ralbe/DALS/mesh_autodecoder/data/train_meshes_aug50"
+VAL_DATA_PATH="/home/ralbe/DALS/mesh_autodecoder/data/test_meshes"
 
 # Define parameter combinations
-AUGMENTATION_TYPES=("noaug" "aug")
 DECODER_MODES=("gcnn")
-LATENT_FEATURES=(128 256 512)
+LATENT_FEATURES=(128 256)
+WEIGHT_EDGE_LOSS=(1e-4 5e-4 1e-3 5e-3 1e-2 5e-2 1e-1)
+# LATENT_FEATURES=(128)
+# WEIGHT_EDGE_LOSS=(1e-4)
 
 # Fixed parameters
 NUM_VAL_SAMPLES=1
@@ -17,18 +20,11 @@ DATA_RANDOM_SEED=1337
 job_count=0
 
 # Submit jobs for all parameter combinations
-for augmentation in "${AUGMENTATION_TYPES[@]}"; do
-  for decoder in "${DECODER_MODES[@]}"; do
-    for latent in "${LATENT_FEATURES[@]}"; do
-      # Construct paths
-      if [ "$augmentation" = "aug" ]; then
-        TRAIN_DATA_PATH="${BASE_DATA_PATH}/train_meshes_aug20"
-      else
-        TRAIN_DATA_PATH="${BASE_DATA_PATH}/train_meshes"
-      fi
-      VAL_DATA_PATH="/home/ralbe/pyhppc_project/cirr_segm_clean/healthy_T1_meshes"
+for decoder in "${DECODER_MODES[@]}"; do
+  for latent in "${LATENT_FEATURES[@]}"; do
+    for edge_loss in "${WEIGHT_EDGE_LOSS[@]}"; do
       # Create job name
-      JOB_NAME="${augmentation}_${decoder}_${latent}"
+      JOB_NAME="aug_${decoder}_${latent}_edge${edge_loss}"
       
       # Submit job with current configuration
       echo "Submitting job: $JOB_NAME..."
@@ -39,7 +35,7 @@ for augmentation in "${AUGMENTATION_TYPES[@]}"; do
               --partition=titans \
               --gres=gpu:1 \
               --cpus-per-task=4 \
-              --mem=8GB \
+              --mem=16GB \
               --wrap="source /home/ralbe/miniconda3/etc/profile.d/conda.sh && \
                       conda activate mesh_autodecoder && \
                       python /home/ralbe/DALS/mesh_autodecoder/train.py \
@@ -62,7 +58,7 @@ for augmentation in "${AUGMENTATION_TYPES[@]}"; do
                           --weight_norm_loss 1e-4 \
                           --weight_quality_loss 1e-3 \
                           --weight_laplacian_loss 0 \
-                          --weight_edge_loss 1e-4 \
+                          --weight_edge_loss $edge_loss \
                           --template_subdiv 3 \
                           --num_mesh_samples 10000 \
                           --train_batch_size 8 \
@@ -72,7 +68,7 @@ for augmentation in "${AUGMENTATION_TYPES[@]}"; do
                           --lr_reduce_min_lr 1e-5"
       
       job_count=$((job_count + 1))
-      sleep 2
+      sleep 3
     done
   done
 done

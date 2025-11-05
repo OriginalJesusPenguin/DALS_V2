@@ -44,7 +44,6 @@ except ImportError:
     def remesh_template_from_deformed(*args, **kwargs):
         raise NotImplementedError("Remesh functionality not available - missing libremesh.so")
 
-
 class GraphConvBlock(nn.Module):
     def __init__(self, in_features, out_features, hidden_features=None,
                  norm='n'):
@@ -403,6 +402,11 @@ class MeshDecoderTrainer:
 
     def to(self, device):
         device = torch.device(device)  # Ensure we have a torch.device
+        
+        # Log device information
+        if device.type == 'cuda':
+            print(f"Moving model to GPU: {torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'N/A'}")
+        
         self.device = device
         self.decoder.to(device)
         self.template = self.template.to(device)

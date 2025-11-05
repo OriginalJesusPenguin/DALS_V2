@@ -22,8 +22,16 @@ try:
             os.environ['CXX'] = 'g++'
             os.environ['CC'] = 'gcc'
         
+        # Get the absolute path to the C++ source file
+        current_dir = os.path.dirname(os.path.abspath(__file__))
+        cpp_file_path = os.path.join(current_dir, 'csrc', 'triangle_self_intersections.cpp')
+        
+        # Check if the C++ file exists
+        if not os.path.exists(cpp_file_path):
+            raise FileNotFoundError(f"C++ source file not found: {cpp_file_path}")
+        
         # Try to load the extension with minimal flags to avoid compilation issues
-        _C_tri = load('_C_tri', ['util/csrc/triangle_self_intersections.cpp'],
+        _C_tri = load('_C_tri', [cpp_file_path],
                       extra_cflags=['-O2'], verbose=False)
     
     print("Successfully loaded C++ extension for triangle self-intersections")
