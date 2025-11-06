@@ -1,0 +1,71 @@
+Field,Value
+Checkpoint,/home/ralbe/DALS/mesh_autodecoder/models/MeshDecoderTrainer_2025-11-06-12-00-26.ckpt
+DALS path,/home/ralbe/DALS/mesh_autodecoder/models/MeshDecoderTrainer_2025-11-06_12-00-26.ckpt
+decoder mode,gcnn
+latent dim,128
+ChamferL2 x 10000,2.7±0.73
+BL quality,0.96±0.013
+No. ints.,0.0029±0.013
+Precision@0.01,54±8.5
+Recall@0.01,56±8.6
+F1@0.01,55±8.6
+Precision@0.02,95±3.9
+Recall@0.02,96±2.7
+F1@0.02,96±3.3
+Search,37±0.085
+Total,37±0.085
+num test samples,20
+Training latent_features,128
+Training steps,1
+Training subdivide,False
+Training hidden_features,"[724, 724, 362]"
+Training concat_latent_at,[]
+Training template_subdiv,3
+Training decoder_mode,gcnn
+Training encoding,none
+Training encoding_order,8
+Training normalization,layer
+Training rotate_template,True
+Training remesh_every,0
+Training remesh_every_edge_length_ratio,1.0
+Training remesh_at,[]
+Training remesh_at_edge_length_ratio,[]
+Training num_epochs,9999
+Training batch_size,8
+Training weight_normal_loss,0.01
+Training weight_norm_loss,0.001
+Training weight_edge_loss,0.01
+Training weight_laplacian_loss,0.01
+Training weight_quality_loss,0.001
+Training use_kendall_gal,False
+Training num_mesh_samples,2500
+Training train_batch_size,8
+Training learning_rate_net,0.002
+Training learning_rate_lv,0.002
+Training lr_reduce_factor,0.5
+Training lr_reduce_patience,50
+Training lr_reduce_min_lr,1e-05
+Training save_shapes_every,0
+Training save_shapes_dir,./saved_shapes
+Training no_checkpoints,False
+Training checkpoint_postfix,
+Training checkpoint_dir,.
+Training random_seed,1337
+Training resume_from,None
+Training profiling,False
+Inference latent_mode,global
+Inference lr,0.001
+Inference num_point_samples,15000
+Inference point_sample_mode,fps
+Inference max_iters,4000
+Inference template_subdiv,4
+Inference remesh_with_forward_at_end,False
+Inference remesh_at_end,False
+Inference remesh_at,[]
+Inference train_test_split_idx,0
+Inference weight_bl_quality_loss,0.001
+Inference weight_edge_length_loss,0.01
+Inference weight_laplacian_loss,0.002
+Inference weight_jacobian_det_loss,0.0005
+Inference batch_size,16
+Inference init_strategy,mean
