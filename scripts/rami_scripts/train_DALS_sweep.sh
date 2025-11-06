@@ -1,15 +1,13 @@
 #!/bin/bash
 
 # Fixed paths
-TRAIN_DATA_PATH="/home/ralbe/DALS/mesh_autodecoder/data/train_meshes_aug50"
+TRAIN_DATA_PATH="/home/ralbe/DALS/mesh_autodecoder/data/train_meshes_aug50/"
 VAL_DATA_PATH="/home/ralbe/DALS/mesh_autodecoder/data/test_meshes"
 
 # Define parameter combinations
 DECODER_MODES=("gcnn")
-LATENT_FEATURES=(128 256)
-WEIGHT_EDGE_LOSS=(1e-4 5e-4 1e-3 5e-3 1e-2 5e-2 1e-1)
-# LATENT_FEATURES=(128)
-# WEIGHT_EDGE_LOSS=(1e-4)
+LATENT_FEATURES=(128)
+WEIGHT_NORMAL_LOSS=(1e-2 1.5e-2 2e-2 3e-2 5e-2 7.5e-2 1e-1)
 
 # Fixed parameters
 NUM_VAL_SAMPLES=1
@@ -22,9 +20,9 @@ job_count=0
 # Submit jobs for all parameter combinations
 for decoder in "${DECODER_MODES[@]}"; do
   for latent in "${LATENT_FEATURES[@]}"; do
-    for edge_loss in "${WEIGHT_EDGE_LOSS[@]}"; do
+    for normal_loss in "${WEIGHT_NORMAL_LOSS[@]}"; do
       # Create job name
-      JOB_NAME="aug_${decoder}_${latent}_edge${edge_loss}"
+      JOB_NAME="aug_${decoder}_${latent}_norm${normal_loss}"
       
       # Submit job with current configuration
       echo "Submitting job: $JOB_NAME..."
@@ -55,16 +53,15 @@ for decoder in "${DECODER_MODES[@]}"; do
                           --num_epochs 9999 \
                           --learning_rate_net 2e-3 \
                           --learning_rate_lv 2e-3 \
-                          --weight_norm_loss 1e-4 \
+                          --weight_normal_loss $normal_loss \
                           --weight_quality_loss 1e-3 \
-                          --weight_laplacian_loss 0 \
-                          --weight_edge_loss $edge_loss \
+                          --weight_edge_loss 1e-2 \
                           --template_subdiv 3 \
-                          --num_mesh_samples 10000 \
+                          --num_mesh_samples 2500 \
                           --train_batch_size 8 \
                           --batch_size 8 \
                           --lr_reduce_factor 0.5 \
-                          --lr_reduce_patience 100 \
+                          --lr_reduce_patience 50 \
                           --lr_reduce_min_lr 1e-5"
       
       job_count=$((job_count + 1))

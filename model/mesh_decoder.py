@@ -301,6 +301,7 @@ class MeshDecoderTrainer:
         parser.add_argument('--weight_edge_loss', type=float, default=1e-2)
         parser.add_argument('--weight_laplacian_loss', type=float, default=1e-2)
         parser.add_argument('--weight_quality_loss', type=float, default=0)
+        parser.add_argument('--use_kendall_gal', action='store_true', default=False)
         parser.add_argument('--num_mesh_samples', type=int, default=10000)
         parser.add_argument('--train_batch_size', type=int, default=16)
         parser.add_argument('--learning_rate_net', type=float, default=1e-3)
@@ -388,6 +389,7 @@ class MeshDecoderTrainer:
             norm=hparams['normalization'][0],
         )
         self.latent_vectors = torch.tensor([])  # Dummy value
+        self.kendall_log_sigmas = None
 
         if device is None:
             # No device was specified so keep everything on default
@@ -398,6 +400,24 @@ class MeshDecoderTrainer:
             self.to(device)
 
         self.log_wandb = log_wandb
+
+
+    def _initialize_kendall_params(self):
+        if not self.use_kendall_gal:
+            self.kendall_log_sigmas = None
+            return
+
+        if self.kendall_log_sigmas is None:
+            self.kendall_log_sigmas = {
+                'chamfer': nn.Parameter(torch.zeros(1, device=self.device)),
+                'edge_length': nn.Parameter(torch.zeros(1, device=self.device)),
+                'quality': nn.Parameter(torch.zeros(1, device=self.device)),
+                'normal': nn.Parameter(torch.zeros(1, device=self.device)),
+            }
+        else:
+            for key, param in self.kendall_log_sigmas.items():
+                if param.device != self.device:
+                    param.data = param.data.to(self.device)
 
 
     def to(self, device):
@@ -413,6 +433,9 @@ class MeshDecoderTrainer:
         if self.template_encoding is not None:
             self.template_encoding = self.template_encoding.to(device)
         self.latent_vectors = self.latent_vectors.to(device)
+        if self.use_kendall_gal and getattr(self, 'kendall_log_sigmas', None) is not None:
+            for param in self.kendall_log_sigmas.values():
+                param.data = param.data.to(device)
         return self
 
 
@@ -467,19 +490,29 @@ class MeshDecoderTrainer:
         else:
             self.template_encoding_extended = None
 
-        # Set up optmizer and scheduler
-        self.optimizer = torch.optim.Adam(
-            [
+        self._initialize_kendall_params()
+
+        # Set up optimizer and scheduler
+        optimizer_params = [
+            {
+                "params": self.decoder.parameters(),
+                "lr": self.learning_rate_net,
+            },
+            {
+                "params": self.latent_vectors.parameters(),
+                "lr": self.learning_rate_lv,
+            },
+        ]
+
+        if self.use_kendall_gal and self.kendall_log_sigmas is not None:
+            optimizer_params.append(
                 {
-                    "params": self.decoder.parameters(),
+                    "params": list(self.kendall_log_sigmas.values()),
                     "lr": self.learning_rate_net,
-                },
-                {
-                    "params": self.latent_vectors.parameters(),
-                    "lr": self.learning_rate_lv,
-                },
-            ]
-        )
+                }
+            )
+
+        self.optimizer = torch.optim.Adam(optimizer_params)
         self.scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
             self.optimizer,
             patience=self.lr_reduce_patience,
@@ -587,41 +620,63 @@ class MeshDecoderTrainer:
                     # Compute weighted loss components
                     weighted_losses = {}
                     loss = torch.tensor(0.0, device=self.device)
-                    
-                    # Chamfer loss (always weighted by 1.0)
-                    weighted_chamfer = losses['chamfer']
-                    loss += weighted_chamfer
-                    weighted_losses['chamfer'] = weighted_chamfer.mean().item()
-                    
-                    # Normal loss
-                    if self.weight_normal_loss != 0:
+
+                    if self.use_kendall_gal:
+                        kendall_terms = [
+                            ('chamfer', losses['chamfer'], True),
+                            ('edge_length', losses['edge_length'], self.weight_edge_loss != 0),
+                            ('quality', losses['quality'], self.weight_quality_loss != 0),
+                            ('normal', losses['normal'], self.weight_normal_loss != 0),
+                        ]
+
+                        norm_mean = losses['norm'].mean()
+
+                        for name, base_loss, enabled in kendall_terms:
+                            if not enabled:
+                                continue
+                            log_sigma = self.kendall_log_sigmas[name]
+                            sigma = torch.exp(log_sigma)
+                            kendall_loss = base_loss / (2.0 * sigma.pow(2)) + log_sigma
+                            loss = loss + kendall_loss
+                            weighted_losses[name] = kendall_loss.item()
+
+                        norm_reg = 1e-3 * norm_mean
+                        loss = loss + norm_reg
+                        weighted_losses['norm_reg'] = norm_reg.item()
+                    else:
+                        # Chamfer loss (always weighted by 1.0)
+                        weighted_chamfer = losses['chamfer']
+                        loss += weighted_chamfer
+                        weighted_losses['chamfer'] = weighted_chamfer.mean().item()
+
+                        # Edge length loss
+                        if self.weight_edge_loss != 0:
+                            weighted_edge = self.weight_edge_loss * losses['edge_length']
+                            loss += weighted_edge
+                            weighted_losses['edge_length'] = weighted_edge.mean().item()
+
+                        # Quality loss
+                        if self.weight_quality_loss != 0:
+                            weighted_quality = self.weight_quality_loss * losses['quality']
+                            loss += weighted_quality
+                            weighted_losses['quality'] = weighted_quality.mean().item()
+
+                        # Norm loss (with ramp) - ensure it's a scalar
+                        if self.weight_norm_loss != 0:
+                            weighted_norm = self.weight_norm_loss * ramp * losses['norm'].mean()
+                            loss += weighted_norm
+                            weighted_losses['norm'] = weighted_norm.item()
+
+                    # Additional weighted losses unaffected by Kendall & Gal
+                    if not self.use_kendall_gal and self.weight_normal_loss != 0:
                         weighted_normal = self.weight_normal_loss * losses['normal']
                         loss += weighted_normal
                         weighted_losses['normal'] = weighted_normal.mean().item()
-                    
-                    # Edge length loss
-                    if self.weight_edge_loss != 0:
-                        weighted_edge = self.weight_edge_loss * losses['edge_length']
-                        loss += weighted_edge
-                        weighted_losses['edge_length'] = weighted_edge.mean().item()
-                    
-                    # Laplacian loss
+
                     if self.weight_laplacian_loss != 0:
                         weighted_laplacian = self.weight_laplacian_loss * losses['laplacian']
                         loss += weighted_laplacian
                         weighted_losses['laplacian'] = weighted_laplacian.mean().item()
-                    
-                    # Quality loss
-                    if self.weight_quality_loss != 0:
-                        weighted_quality = self.weight_quality_loss * losses['quality']
-                        loss += weighted_quality
-                        weighted_losses['quality'] = weighted_quality.mean().item()
-                    
-                    # Norm loss (with ramp) - ensure it's a scalar
-                    if self.weight_norm_loss != 0:
-                        weighted_norm = self.weight_norm_loss * ramp * losses['norm'].mean()
-                        loss += weighted_norm
-                        weighted_losses['norm'] = weighted_norm.item()
 
                     loss = loss.mean()
                     if self.profiling:
@@ -688,6 +743,10 @@ class MeshDecoderTrainer:
                     if 'norm' in weighted_losses:
                         norm_pct = (weighted_losses['norm'] / total_loss) * 100
                         contributions.append(f"Reg:/{norm_pct:.0f}%")
+
+                    if 'norm_reg' in weighted_losses:
+                        norm_reg_pct = (weighted_losses['norm_reg'] / total_loss) * 100
+                        contributions.append(f"Reg(1e-3)/{norm_reg_pct:.0f}%")
                     
                     # Format contributions string
                     contributions_str = "/".join(contributions)
@@ -772,6 +831,10 @@ class MeshDecoderTrainer:
                     }
                     for key, val in epoch_losses.items():
                         log_dict[f'loss/{key}'] = val
+                    if self.use_kendall_gal and getattr(self, 'kendall_log_sigmas', None) is not None:
+                        for name, param in self.kendall_log_sigmas.items():
+                            log_dict[f'kendall/sigma_{name}'] = float(torch.exp(param.detach()).cpu())
+                            log_dict[f'kendall/log_sigma_{name}'] = float(param.detach().cpu())
                     if self.profiling:
                         for key, val in epoch_profile_times.items():
                             log_dict[f'prof/{key}'] = np.sum(val)
@@ -785,18 +848,46 @@ class MeshDecoderTrainer:
                 # Calculate weighted losses for epoch summary
                 weighted_epoch_losses = {}
                 weighted_epoch_losses['chamfer'] = epoch_losses["chamfer"]
-                
-                if self.weight_normal_loss != 0:
-                    weighted_epoch_losses['normal'] = self.weight_normal_loss * epoch_losses["normal"]
-                if self.weight_edge_loss != 0:
-                    weighted_epoch_losses['edge_length'] = self.weight_edge_loss * epoch_losses["edge_length"]
-                if self.weight_laplacian_loss != 0:
-                    weighted_epoch_losses['laplacian'] = self.weight_laplacian_loss * epoch_losses["laplacian"]
-                if self.weight_quality_loss != 0:
-                    weighted_epoch_losses['quality'] = self.weight_quality_loss * epoch_losses["quality"]
-                if self.weight_norm_loss != 0:
-                    ramp = min(1.0, epoch / 100.0)
-                    weighted_epoch_losses['norm'] = self.weight_norm_loss * ramp * epoch_losses["norm"]
+
+                if self.use_kendall_gal:
+                    if self.weight_edge_loss != 0:
+                        sigma_edge = torch.exp(self.kendall_log_sigmas['edge_length']).item()
+                        log_sigma_edge = self.kendall_log_sigmas['edge_length'].item()
+                        weighted_epoch_losses['edge_length'] = (
+                            epoch_losses['edge_length'] / (2.0 * sigma_edge ** 2) + log_sigma_edge
+                        )
+                    if self.weight_quality_loss != 0:
+                        sigma_quality = torch.exp(self.kendall_log_sigmas['quality']).item()
+                        log_sigma_quality = self.kendall_log_sigmas['quality'].item()
+                        weighted_epoch_losses['quality'] = (
+                            epoch_losses['quality'] / (2.0 * sigma_quality ** 2) + log_sigma_quality
+                        )
+                    if self.weight_normal_loss != 0:
+                        sigma_normal = torch.exp(self.kendall_log_sigmas['normal']).item()
+                        log_sigma_normal = self.kendall_log_sigmas['normal'].item()
+                        weighted_epoch_losses['normal'] = (
+                            epoch_losses['normal'] / (2.0 * sigma_normal ** 2) + log_sigma_normal
+                        )
+                    sigma_chamfer = torch.exp(self.kendall_log_sigmas['chamfer']).item()
+                    log_sigma_chamfer = self.kendall_log_sigmas['chamfer'].item()
+                    weighted_epoch_losses['chamfer'] = (
+                        epoch_losses['chamfer'] / (2.0 * sigma_chamfer ** 2) + log_sigma_chamfer
+                    )
+                    if self.weight_laplacian_loss != 0:
+                        weighted_epoch_losses['laplacian'] = self.weight_laplacian_loss * epoch_losses["laplacian"]
+                    weighted_epoch_losses['norm_reg'] = 1e-3 * epoch_losses["norm"]
+                else:
+                    if self.weight_normal_loss != 0:
+                        weighted_epoch_losses['normal'] = self.weight_normal_loss * epoch_losses["normal"]
+                    if self.weight_edge_loss != 0:
+                        weighted_epoch_losses['edge_length'] = self.weight_edge_loss * epoch_losses["edge_length"]
+                    if self.weight_laplacian_loss != 0:
+                        weighted_epoch_losses['laplacian'] = self.weight_laplacian_loss * epoch_losses["laplacian"]
+                    if self.weight_quality_loss != 0:
+                        weighted_epoch_losses['quality'] = self.weight_quality_loss * epoch_losses["quality"]
+                    if self.weight_norm_loss != 0:
+                        ramp = min(1.0, epoch / 100.0)
+                        weighted_epoch_losses['norm'] = self.weight_norm_loss * ramp * epoch_losses["norm"]
                 
                 # Calculate percentages for active losses
                 if 'chamfer' in weighted_epoch_losses:
@@ -822,6 +913,10 @@ class MeshDecoderTrainer:
                 if 'norm' in weighted_epoch_losses:
                     norm_pct = (weighted_epoch_losses['norm'] / total_epoch_loss) * 100
                     epoch_contributions.append(f"Norm/{norm_pct:.0f}%")
+
+                if 'norm_reg' in weighted_epoch_losses:
+                    norm_reg_pct = (weighted_epoch_losses['norm_reg'] / total_epoch_loss) * 100
+                    epoch_contributions.append(f"NormReg/{norm_reg_pct:.0f}%")
                 
                 # Format contributions string
                 epoch_contributions_str = "/".join(epoch_contributions)
@@ -1005,6 +1100,11 @@ class MeshDecoderTrainer:
             'latent_features': self.latent_features,
             'decoder_mode': self.decoder_mode,
         }
+        if self.use_kendall_gal and self.kendall_log_sigmas is not None:
+            state['kendall_log_sigmas'] = {
+                key: param.detach().cpu().clone()
+                for key, param in self.kendall_log_sigmas.items()
+            }
         if self.profiling:
             state['profile_times'] = self.profile_times
 
@@ -1030,6 +1130,13 @@ class MeshDecoderTrainer:
         self.latent_vectors = state['latent_vectors']
         self.template = state['template']
         self.hparams = state['hparams']
+        if self.use_kendall_gal and 'kendall_log_sigmas' in state:
+            if self.kendall_log_sigmas is None:
+                self._initialize_kendall_params()
+            for key, value in state['kendall_log_sigmas'].items():
+                mapped_key = 'normal' if key == 'norm' else key
+                if mapped_key in self.kendall_log_sigmas:
+                    self.kendall_log_sigmas[mapped_key].data.copy_(value.to(self.device))
         epoch = state['epoch']
         self.best_epoch = state['best_epoch']
         self.best_loss = state['best_loss']

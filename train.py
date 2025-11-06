@@ -323,7 +323,7 @@ def main(args):
     data_parser.add_argument('--train_data_path', type=str)
     data_parser.add_argument('--val_data_path', type=str)
     data_parser.add_argument('--num_val_samples', type=int, default=5)
-    data_parser.add_argument('--num_augment', type=int, default=100)
+    data_parser.add_argument('--num_augment', type=int, default=0)
     data_parser.add_argument('--data_random_seed', type=int, default=1337)
     data_parser.add_argument('--pw_num_anchor', type=int, default=4)
     data_parser.add_argument('--pw_sample_type', type=str, default='fps')

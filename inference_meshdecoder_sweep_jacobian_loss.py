@@ -582,9 +582,6 @@ def main():
         return
 
     print(f"Pending combinations: {len(combos_to_run)}")
-    print("  " + ", ".join(
-        [f"jac={format_scientific(j)}, bl={format_scientific(b)}" for j, b in combos_to_run]
-    ))
 
     for jac_weight, bl_weight in combos_to_run:
         inference_args = get_inference_args()

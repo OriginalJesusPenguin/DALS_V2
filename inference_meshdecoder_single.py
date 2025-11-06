@@ -75,7 +75,7 @@ def get_inference_args():
     args.lr = 1e-3  # Increased learning rate for better optimization
     args.num_point_samples = 15_000  # Increased to 15k
     args.point_sample_mode = "fps"
-    args.max_iters = 3000  # Fixed iterations with learning rate reduction
+    args.max_iters = 4000  # Fixed iterations with learning rate reduction
     args.template_subdiv = 4  
     args.remesh_with_forward_at_end = False
     args.remesh_at_end = False
@@ -233,7 +233,7 @@ def run_inference_on_checkpoint(checkpoint_info, args):
                 optim.step()
                 
                 # Print progress every 50 iterations
-                if it % 50 == 0:
+                if it % 250 == 0:
                     print(f"  Iter {it}: Loss = {loss.item():.6f}, Best = {min_loss:.6f}, LR = {current_lr:.2e}")
                 
                 if it in remesh_at:
@@ -356,7 +356,7 @@ def run_inference_on_checkpoint(checkpoint_info, args):
                 optim.step()
                 
                 # Print progress every 50 iterations
-                if it % 50 == 0:
+                if it % 250 == 0:
                     print(f"  Iter {it}: Loss = {loss.item():.6f}, Best = {min_loss:.6f}, LR = {current_lr:.2e}")
                 
                 if it in remesh_at:
