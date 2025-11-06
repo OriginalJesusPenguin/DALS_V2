@@ -1,1 +1,0 @@
-Namespace(checkpoint_dir=None, checkpoint_jobid=None, data_path='/home/ralbe/pyhppc_project/cirr_segm_clean/unit_sphere_meshes_subsample', lr=0.002, max_iters=1000, num_point_samples=2500, output_dir='/home/ralbe/DALS/mesh_autodecoder/output/deep_sdf', remesh_at_end=False, train_test_split_idx=-1, voxel_res=128)

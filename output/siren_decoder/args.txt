@@ -1,1 +1,0 @@
-Namespace(checkpoint_dir='/path/to/checkpoint/dir', checkpoint_jobid=None, data_path='/home/ralbe/pyhppc_project/cirr_segm_clean/unit_sphere_meshes', lr=0.001, lv_grid_size=1, max_iters=500, model_type='mehta', num_point_samples=2500, output_dir='/home/ralbe/DALS/mesh_autodecoder/output/siren_decoder', remesh_at_end=False, train_test_split_idx=-55, voxel_res=128)
