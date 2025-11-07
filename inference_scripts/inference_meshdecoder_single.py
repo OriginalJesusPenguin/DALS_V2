@@ -16,6 +16,8 @@ from os.path import join, basename
 from tqdm import tqdm
 import trimesh
 
+INFERENCE_RESULTS_DIR = "/home/ralbe/DALS/mesh_autodecoder/inference_results"
+
 # Add project to path
 sys.path.append('/home/ralbe/DALS/mesh_autodecoder')
 
@@ -73,9 +75,9 @@ def get_inference_args():
     args = Args()
     args.latent_mode = "global" 
     args.lr = 1e-3  # Increased learning rate for better optimization
-    args.num_point_samples = 15_000  # Increased to 15k
+    args.num_point_samples = 25_000  # Increased to 20k
     args.point_sample_mode = "fps"
-    args.max_iters = 4000  # Fixed iterations with learning rate reduction
+    args.max_iters = 2000  # Fixed iterations with learning rate reduction
     args.template_subdiv = 4  
     args.remesh_with_forward_at_end = False
     args.remesh_at_end = False
@@ -118,11 +120,12 @@ def run_inference_on_checkpoint(checkpoint_info, args):
     # Determine test data path
     train_path = checkpoint_info['train_data_path']
     test_data_path = train_path.replace('train_meshes', 'test_meshes')
+    mesh_output_dir = checkpoint_info["mesh_output_dir"]
     
     # Check if test data exists
     if not os.path.exists(test_data_path):
         print(f"Warning: Test data path does not exist: {test_data_path}")
-        return None
+        return None, None, mesh_output_dir
     
     # Load model
     hparams = checkpoint['hparams']
@@ -152,15 +155,15 @@ def run_inference_on_checkpoint(checkpoint_info, args):
     print(f'Processing all {len(meshes)} test samples')
     
     # Create output directory for saved meshes
-    model_name = os.path.basename(checkpoint_path).replace('.ckpt', '')
-    # model_name = '/home/ralbe/DALS/mesh_autodecoder/models/MeshDecoderTrainer_2025-10-23_14-01-45.ckpt'
-    mesh_output_dir = f'inference_results/meshes_{model_name}'
+    mesh_output_dir = checkpoint_info["mesh_output_dir"]
     os.makedirs(mesh_output_dir, exist_ok=True)
+    latent_output_dir = os.path.join(mesh_output_dir, 'latents')
+    os.makedirs(latent_output_dir, exist_ok=True)
     print(f'Created mesh output directory: {mesh_output_dir}')
     
     if len(meshes) == 0:
         print("Warning: No test meshes found")
-        return None
+        return None, None, mesh_output_dir
     
     mesh_filenames = sorted(glob(os.path.join(test_data_path, '*.obj')))
     mesh_filenames = [basename(fname) for fname in mesh_filenames]
@@ -177,7 +180,9 @@ def run_inference_on_checkpoint(checkpoint_info, args):
     print('Running inference...')
     
     if args.latent_mode == 'global':
-        for i, true_mesh in enumerate(tqdm(meshes, desc="Inference", ncols=100)):
+        for i, (true_mesh, mesh_name) in enumerate(
+            tqdm(zip(meshes, mesh_filenames), total=len(mesh_filenames), desc="Inference", ncols=100)
+        ):
             true_mesh = true_mesh.to(device)
             true_points = sample_points_from_meshes(true_mesh, args.num_point_samples)
             
@@ -270,26 +275,44 @@ def run_inference_on_checkpoint(checkpoint_info, args):
             metrics['Remesh'] = t2 - t1
             metrics['Decode'] = t3 - t2
             metrics['Total'] = t3 - t0
-            all_metrics.append(metrics)
+            metrics['target_mesh_name'] = mesh_name
+            metrics_record = {}
+            for key, value in metrics.items():
+                if hasattr(value, 'item'):
+                    value = value.item()
+                if isinstance(value, np.generic):
+                    value = float(value)
+                if isinstance(value, (float, int)):
+                    metrics_record[key] = float(value)
+                else:
+                    metrics_record[key] = value
+            all_metrics.append(metrics_record)
             
             # Save the final optimized mesh
-            mesh_filename = f'optimized_mesh_{i:03d}.obj'
-            mesh_path = os.path.join(mesh_output_dir, mesh_filename)
-            if save_mesh_to_obj(pred_mesh, mesh_path):
-                print(f'Saved optimized mesh {i+1}/{len(meshes)}: {mesh_filename}')
-            
-            # Save the target (ground truth) mesh for comparison
-            target_filename = f'target_mesh_{i:03d}.obj'
+            mesh_stem = os.path.splitext(mesh_name)[0]
+            optimized_filename = f'{mesh_stem}_optimized.obj'
+            optimized_path = os.path.join(mesh_output_dir, optimized_filename)
+            if save_mesh_to_obj(pred_mesh, optimized_path):
+                print(f'Saved optimized mesh {i+1}/{len(meshes)}: {optimized_filename}')
+
+            target_filename = f'{mesh_stem}_target.obj'
             target_path = os.path.join(mesh_output_dir, target_filename)
             if save_mesh_to_obj(true_mesh, target_path):
                 print(f'Saved target mesh {i+1}/{len(meshes)}: {target_filename}')
+
+            latent_filename = f'{mesh_stem}_latent.pt'
+            latent_path = os.path.join(latent_output_dir, latent_filename)
+            torch.save(best_lv.detach().cpu(), latent_path)
+            print(f'Saved latent vector {i+1}/{len(meshes)}: {latent_filename}')
             
             # Clear GPU cache to prevent memory buildup
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
     
     elif args.latent_mode == 'local':
-        for i, true_mesh in enumerate(tqdm(meshes, desc="Local latent optimization")):
+        for i, (true_mesh, mesh_name) in enumerate(
+            tqdm(zip(meshes, mesh_filenames), total=len(mesh_filenames), desc="Local latent optimization")
+        ):
             true_mesh = true_mesh.to(device)
             if args.point_sample_mode == 'uniform':
                 true_points = sample_points_from_meshes(true_mesh, args.num_point_samples)
@@ -397,19 +420,35 @@ def run_inference_on_checkpoint(checkpoint_info, args):
             metrics['Remesh'] = t2 - t1
             metrics['Decode'] = t3 - t2
             metrics['Total'] = t2 - t0
-            all_metrics.append(metrics)
+            metrics['target_mesh_name'] = mesh_name
+            metrics_record = {}
+            for key, value in metrics.items():
+                if hasattr(value, 'item'):
+                    value = value.item()
+                if isinstance(value, np.generic):
+                    value = float(value)
+                if isinstance(value, (float, int)):
+                    metrics_record[key] = float(value)
+                else:
+                    metrics_record[key] = value
+            all_metrics.append(metrics_record)
             
             # Save the final optimized mesh
-            mesh_filename = f'optimized_mesh_{i:03d}.obj'
-            mesh_path = os.path.join(mesh_output_dir, mesh_filename)
-            if save_mesh_to_obj(pred_mesh, mesh_path):
-                print(f'Saved optimized mesh {i+1}/{len(meshes)}: {mesh_filename}')
-            
-            # Save the target (ground truth) mesh for comparison
-            target_filename = f'target_mesh_{i:03d}.obj'
+            mesh_stem = os.path.splitext(mesh_name)[0]
+            optimized_filename = f'{mesh_stem}_optimized.obj'
+            optimized_path = os.path.join(mesh_output_dir, optimized_filename)
+            if save_mesh_to_obj(pred_mesh, optimized_path):
+                print(f'Saved optimized mesh {i+1}/{len(meshes)}: {optimized_filename}')
+
+            target_filename = f'{mesh_stem}_target.obj'
             target_path = os.path.join(mesh_output_dir, target_filename)
             if save_mesh_to_obj(true_mesh, target_path):
                 print(f'Saved target mesh {i+1}/{len(meshes)}: {target_filename}')
+
+            latent_filename = f'{mesh_stem}_latent.pt'
+            latent_path = os.path.join(latent_output_dir, latent_filename)
+            torch.save(best_lv.detach().cpu(), latent_path)
+            print(f'Saved latent vector {i+1}/{len(meshes)}: {latent_filename}')
             
             # Clear GPU cache to prevent memory buildup
             if torch.cuda.is_available():
@@ -417,159 +456,143 @@ def run_inference_on_checkpoint(checkpoint_info, args):
     
     # Aggregate metrics
     if len(all_metrics) == 0:
-        return None
+        return None, None, mesh_output_dir
     
     # Compute mean and std for each metric
     aggregated_metrics = {}
-    for metric_name in all_metrics[0].keys():
-        values = [m[metric_name] for m in all_metrics]
-        # Convert PyTorch tensors to Python floats before computing statistics
-        float_values = []
-        for v in values:
-            if hasattr(v, 'item'):  # PyTorch tensor
-                float_values.append(v.item())
-            else:  # Already a Python float/int
-                float_values.append(float(v))
-        aggregated_metrics[f'{metric_name}_mean'] = np.mean(float_values)
-        aggregated_metrics[f'{metric_name}_std'] = np.std(float_values)
-    
+    exclude_from_aggregation = {"target_mesh_name", "Search", "Total"}
+    aggregation_keys = [
+        key
+        for key, value in all_metrics[0].items()
+        if key not in exclude_from_aggregation and isinstance(value, (int, float))
+    ]
+
+    for metric_name in aggregation_keys:
+        values = [m[metric_name] for m in all_metrics if isinstance(m.get(metric_name), (int, float))]
+        if not values:
+            continue
+        aggregated_metrics[f'{metric_name}_mean'] = float(np.mean(values))
+        aggregated_metrics[f'{metric_name}_std'] = float(np.std(values))
+
     aggregated_metrics['num_test_samples'] = len(all_metrics)
     
     # Print summary of saved meshes
     saved_meshes = [f for f in os.listdir(mesh_output_dir) if f.endswith('.obj')]
-    optimized_count = len([f for f in saved_meshes if f.startswith('optimized_')])
-    target_count = len([f for f in saved_meshes if f.startswith('target_')])
+    optimized_count = len([f for f in saved_meshes if f.endswith('_optimized.obj')])
+    target_count = len([f for f in saved_meshes if f.endswith('_target.obj')])
     print(f'Saved {optimized_count} optimized meshes and {target_count} target meshes to {mesh_output_dir}')
     
-    return aggregated_metrics
+    return aggregated_metrics, all_metrics, mesh_output_dir
 
 def main():
     parser = argparse.ArgumentParser(description='Run inference on a single model checkpoint')
     parser.add_argument('--checkpoint_path', type=str, required=True,
                         help='Path to the checkpoint file')
-    parser.add_argument('--output_csv', type=str, required=True,
-                        help='Path to output CSV file for results')
-    
+
     args = parser.parse_args()
-    
-    # Check GPU availability and memory
+
     if torch.cuda.is_available():
         print(f"Using GPU: {torch.cuda.get_device_name()}")
         print(f"GPU Memory: {torch.cuda.get_device_properties(0).total_memory / 1e9:.1f} GB")
         print(f"Available GPU Memory: {torch.cuda.memory_reserved(0) / 1e9:.1f} GB")
     else:
         print("Warning: CUDA not available, using CPU (will be very slow)")
-    
-    # Load checkpoint and extract metadata
+
     print(f"Processing checkpoint: {args.checkpoint_path}")
     checkpoint = torch.load(args.checkpoint_path, map_location=device)
-    
-    # Extract metadata from checkpoint
+
     latent_vectors = checkpoint['latent_vectors']
     train_data_path = checkpoint['train_data_path']
     decoder_mode = checkpoint['decoder_mode']
-    
-    # Extract the parent folder name one above 'train_meshes'
-    folder_name = os.path.basename(os.path.dirname(train_data_path))
-    if 'mixed' in folder_name:
-        split_type = 'mixed'
-    elif 'separate' in folder_name:
-        split_type = 'separate'
-    else:
-        split_type = None
-
-    if 'global' in folder_name:
-        scaling_type = 'global'
-    elif 'individual' in folder_name:
-        scaling_type = 'individual'
-    else:
-        scaling_type = None
-
-    if 'noaug' in folder_name:
-        augmentation_type = 'noaug'
-    elif 'aug' in folder_name:
-        augmentation_type = 'aug'
-    else:
-        augmentation_type = None
 
     if isinstance(latent_vectors, torch.nn.Embedding):
         latent_dim = latent_vectors.weight.shape[1]
     else:
         latent_dim = None
 
-    print(f"Config: {split_type}_{scaling_type}_{augmentation_type}, decoder: {decoder_mode}, latent: {latent_dim}")
-    
-    # Create checkpoint info
+    model_name = os.path.basename(args.checkpoint_path).replace('.ckpt', '')
+    mesh_output_dir = os.path.join(INFERENCE_RESULTS_DIR, f'meshes_{model_name}')
+
     checkpoint_info = {
         "DALS_path": args.checkpoint_path,
-        "split_type": split_type,
-        "augmentation_type": augmentation_type,
-        "scaling_type": scaling_type,
         "decoder_mode": decoder_mode,
         "latent_dim": latent_dim,
-        "train_data_path": train_data_path
+        "train_data_path": train_data_path,
+        "model_name": model_name,
+        "mesh_output_dir": mesh_output_dir,
     }
-    
-    # Run inference
+
     inference_args = get_inference_args()
-    metrics = run_inference_on_checkpoint(checkpoint_info, inference_args)
-    
-    if metrics is not None:
-        # Update checkpoint info with metrics
-        checkpoint_info.update(metrics)
-        print(f"Successfully processed {checkpoint_info['num_test_samples']} test samples")
-        
-        # Print some key metrics
-        if 'ChamferL2 x 10000_mean' in metrics:
-            print(f"ChamferL2: {metrics['ChamferL2 x 10000_mean']:.4f} ± {metrics['ChamferL2 x 10000_std']:.4f}")
-        if 'BL quality_mean' in metrics:
-            print(f"BL Quality: {metrics['BL quality_mean']:.4f} ± {metrics['BL quality_std']:.4f}")
+    aggregated_metrics, per_sample_metrics, mesh_output_dir = run_inference_on_checkpoint(checkpoint_info, inference_args)
+
+    os.makedirs(mesh_output_dir, exist_ok=True)
+
+    aggregated_row = {
+        "checkpoint_path": args.checkpoint_path,
+        "decoder_mode": decoder_mode,
+        "latent_dim": latent_dim if latent_dim is not None else '',
+        "latent_mode": inference_args.latent_mode,
+        "lr": inference_args.lr,
+        "max_iters": inference_args.max_iters,
+        "template_subdiv": inference_args.template_subdiv,
+        "weight_bl_quality_loss": inference_args.weight_bl_quality_loss,
+        "weight_edge_length_loss": inference_args.weight_edge_length_loss,
+        "weight_laplacian_loss": inference_args.weight_laplacian_loss,
+        "weight_jacobian_det_loss": inference_args.weight_jacobian_det_loss,
+    }
+
+    aggregated_path = os.path.join(mesh_output_dir, "test_metrics.csv")
+    per_sample_path = os.path.join(mesh_output_dir, "test_metrics_per_sample.csv")
+
+    if aggregated_metrics is not None:
+        print(f"Successfully processed {aggregated_metrics['num_test_samples']} test samples")
+
+        metric_keys = sorted(key for key in aggregated_metrics.keys() if key != 'num_test_samples')
+        for key in metric_keys:
+            aggregated_row[key] = aggregated_metrics[key]
+        aggregated_row['num_test_samples'] = aggregated_metrics.get('num_test_samples', 0)
+
+        aggregated_columns = list(aggregated_row.keys())
+        with open(aggregated_path, mode='w', newline='') as csv_file:
+            writer = csv.DictWriter(csv_file, fieldnames=aggregated_columns)
+            writer.writeheader()
+            writer.writerow(aggregated_row)
+
+        if per_sample_metrics:
+            metric_columns = sorted({
+                key for row in per_sample_metrics for key in row.keys() if key != 'target_mesh_name'
+            })
+            per_sample_columns = ['target_mesh_name'] + metric_columns
+            with open(per_sample_path, mode='w', newline='') as csv_file:
+                writer = csv.DictWriter(csv_file, fieldnames=per_sample_columns)
+                writer.writeheader()
+                for row in per_sample_metrics:
+                    cleaned_row = {}
+                    for field in per_sample_columns:
+                        value = row.get(field, '')
+                        cleaned_row[field] = value
+                    writer.writerow(cleaned_row)
+
+        if 'ChamferL2 x 10000_mean' in aggregated_metrics:
+            print(f"ChamferL2: {aggregated_metrics['ChamferL2 x 10000_mean']:.4f} ± {aggregated_metrics['ChamferL2 x 10000_std']:.4f}")
+        if 'BL quality_mean' in aggregated_metrics:
+            print(f"BL Quality: {aggregated_metrics['BL quality_mean']:.4f} ± {aggregated_metrics['BL quality_std']:.4f}")
     else:
         print("Failed to process this checkpoint")
-        # Add placeholder metrics
-        checkpoint_info.update({
-            'num_test_samples': 0,
-            'ChamferL2 x 10000_mean': None,
-            'ChamferL2 x 10000_std': None,
-            'BL quality_mean': None,
-            'BL quality_std': None,
-        })
-    
-    # Define CSV columns
-    csv_columns = [
-        "DALS_path", "split_type", "augmentation_type", "scaling_type", "decoder_mode", "latent_dim",
-        "ChamferL2 x 10000_mean", "ChamferL2 x 10000_std",
-        "BL quality_mean", "BL quality_std", 
-        "No. ints._mean", "No. ints._std",
-        "Precision@0.01_mean", "Precision@0.01_std",
-        "Recall@0.01_mean", "Recall@0.01_std", 
-        "F1@0.01_mean", "F1@0.01_std",
-        "Precision@0.02_mean", "Precision@0.02_std",
-        "Recall@0.02_mean", "Recall@0.02_std",
-        "F1@0.02_mean", "F1@0.02_std",
-        "Search_mean", "Search_std",
-        "Total_mean", "Total_std",
-        "num_test_samples"
-    ]
-    
-    # Write results to CSV
-    print(f"Writing results to: {args.output_csv}")
-    with open(args.output_csv, mode='w', newline='') as csv_file:
-        writer = csv.DictWriter(csv_file, fieldnames=csv_columns)
-        writer.writeheader()
-        
-        # Clean the row data to handle None values and ensure all fields are present
-        cleaned_row = {}
-        for field in csv_columns:
-            if field in checkpoint_info and checkpoint_info[field] is not None:
-                cleaned_row[field] = checkpoint_info[field]
-            else:
-                cleaned_row[field] = ''  # Use empty string for missing/None values
-        writer.writerow(cleaned_row)
-    
-    print(f"Successfully saved inference results to {args.output_csv}")
-    
-    # Final GPU cleanup
+        aggregated_row['num_test_samples'] = 0
+        aggregated_columns = list(aggregated_row.keys())
+        with open(aggregated_path, mode='w', newline='') as csv_file:
+            writer = csv.DictWriter(csv_file, fieldnames=aggregated_columns)
+            writer.writeheader()
+            writer.writerow(aggregated_row)
+
+        with open(per_sample_path, mode='w', newline='') as csv_file:
+            writer = csv.DictWriter(csv_file, fieldnames=['target_mesh_name'])
+            writer.writeheader()
+
+    print(f"Aggregated metrics saved to {aggregated_path}")
+    print(f"Per-sample metrics saved to {per_sample_path}")
+
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
         print(f"Final GPU Memory Usage: {torch.cuda.memory_allocated(0) / 1e9:.1f} GB")
