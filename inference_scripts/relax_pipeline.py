@@ -1,17 +1,22 @@
+from __future__ import annotations
+
 CHECKPOINT_DEFAULT = "/home/ralbe/DALS/mesh_autodecoder/models/MeshDecoderTrainer_2025-11-06_12-00-26.ckpt"
 LATENT_DIR_DEFAULT = "/home/ralbe/DALS/mesh_autodecoder/inference_results/meshes_MeshDecoderTrainer_2025-11-06_12-00-26/latents"
 TARGET_DIR_DEFAULT = "/home/ralbe/DALS/mesh_autodecoder/inference_results/meshes_MeshDecoderTrainer_2025-11-06_12-00-26"
 #!/usr/bin/env python3
 """Mask latent vectors, decode meshes, and evaluate robustness metrics."""
 
-from __future__ import annotations
 
 import argparse
 import json
 import math
 import os
+import random
 import re
 import sys
+import time
+import warnings
+from collections import defaultdict
 from dataclasses import dataclass
 from typing import Dict, Iterable, List, Optional
 
@@ -27,6 +32,9 @@ from tqdm import tqdm
 PROJECT_ROOT = "/home/ralbe/DALS/mesh_autodecoder"
 if PROJECT_ROOT not in sys.path:
     sys.path.append(PROJECT_ROOT)
+
+warnings.filterwarnings("ignore", category=UserWarning, message="No mtl file provided")
+warnings.filterwarnings("ignore", category=UserWarning, message="__floordiv__ is deprecated.*")
 
 from pytorch3d.io import load_objs_as_meshes
 from pytorch3d.ops import sample_points_from_meshes
@@ -335,17 +343,24 @@ def ensure_directory(path: str) -> None:
 
 
 def run_pipeline(args: argparse.Namespace) -> None:
+    total_start = time.perf_counter()
+    timings: defaultdict[str, float] = defaultdict(float)
+    record_count = 0
+
     device = torch.device(args.device)
     ensure_directory(args.output_dir)
 
+    ckpt_start = time.perf_counter()
     ckpt_bundle = load_checkpoint(args.checkpoint, device)
     decoder: MeshDecoder = ckpt_bundle["decoder"]
     template: Meshes = ckpt_bundle["template"]
+    timings["load_checkpoint"] += time.perf_counter() - ckpt_start
 
     latent_files = discover_latents(args.latent_dir)
     targets: Dict[str, TargetInfo] = {}
     latents: Dict[str, torch.Tensor] = {}
 
+    latents_start = time.perf_counter()
     for filename in tqdm(latent_files, desc="Loading latents", leave=False):
         name = filename.replace("_latent.pt", "").replace(".pt", "")
         latent_path = os.path.join(args.latent_dir, filename)
@@ -360,9 +375,22 @@ def run_pipeline(args: argparse.Namespace) -> None:
             args.emd_samples,
             args.lb_k,
         )
+    timings["load_latents_and_targets"] += time.perf_counter() - latents_start
 
     latent_dim = next(iter(latents.values())).numel()
+    if args.seed is not None:
+        torch.manual_seed(args.seed)
+        np.random.seed(args.seed)
+        random.seed(args.seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(args.seed)
+    mask_gen_start = time.perf_counter()
     masks = generate_masks(latent_dim, args.num_masks, args.mask_prob, device)
+    timings["generate_masks"] += time.perf_counter() - mask_gen_start
+    masks_path = os.path.join(args.output_dir, "relax_masks.pt")
+    save_masks_start = time.perf_counter()
+    torch.save(masks.detach().cpu(), masks_path)
+    timings["save_masks"] += time.perf_counter() - save_masks_start
 
     records: List[Dict[str, object]] = []
 
@@ -372,22 +400,31 @@ def run_pipeline(args: argparse.Namespace) -> None:
             target = targets[name]
             masked_latent = latent_tensor * mask
 
+            record_start = time.perf_counter()
             pred_mesh = decode_mesh(decoder, template, masked_latent)
+            timings["decode"] += time.perf_counter() - record_start
+
+            sample_start = time.perf_counter()
             pred_points = sample_pred_points(pred_mesh, args.metric_samples).detach()
             target_points = target.samples
             if target_points.device != pred_points.device:
                 target_points = target_points.to(pred_points.device)
+            timings["sample_pred_points"] += time.perf_counter() - sample_start
+
             pred_batch = pred_points.unsqueeze(0)
             target_batch = target_points.unsqueeze(0)
+            chamfer_start = time.perf_counter()
             metrics = compute_chamfer_metrics(pred_batch, target_batch, [0.01, 0.02])
-            mesh_metrics = compute_mesh_metrics(pred_mesh)
+            timings["chamfer_and_point_metrics"] += time.perf_counter() - chamfer_start
 
+            mesh_metrics_start = time.perf_counter()
+            mesh_metrics = compute_mesh_metrics(pred_mesh)
+            timings["mesh_metrics"] += time.perf_counter() - mesh_metrics_start
+
+            emd_start = time.perf_counter()
             pred_points_np = pred_points[: min(args.emd_samples, pred_points.shape[0])].detach().cpu().numpy()
             emd_value = compute_emd(pred_points_np, target.samples_np)
-
-            verts_np = pred_mesh.verts_list()[0].detach().cpu().numpy()
-            faces_np = pred_mesh.faces_list()[0].detach().cpu().numpy()
-            lb_pred = laplace_beltrami_eigs(verts_np, faces_np, args.lb_k)
+            timings["emd"] += time.perf_counter() - emd_start
 
             record = {
                 "checkpoint": os.path.basename(args.checkpoint),
@@ -398,29 +435,35 @@ def run_pipeline(args: argparse.Namespace) -> None:
                 "patient_id": target.patient_id,
                 "target_path": target.target_path,
                 "emd": emd_value,
-                "lb_pred_eigs": format_list(lb_pred),
-                "lb_target_eigs": format_list(target.lb_eigs),
-                "lb_l2_delta": float(np.linalg.norm(lb_pred - target.lb_eigs)),
             }
+
+            if args.compute_lb:
+                lb_start = time.perf_counter()
+                verts_np = pred_mesh.verts_list()[0].detach().cpu().numpy()
+                faces_np = pred_mesh.faces_list()[0].detach().cpu().numpy()
+                lb_pred = laplace_beltrami_eigs(verts_np, faces_np, args.lb_k)
+                timings["laplace_eigs"] += time.perf_counter() - lb_start
+                record["lb_pred_eigs"] = format_list(lb_pred)
+                record["lb_target_eigs"] = format_list(target.lb_eigs)
+                record["lb_l2_delta"] = float(np.linalg.norm(lb_pred - target.lb_eigs))
+
             record.update(metrics)
             record.update(mesh_metrics)
             records.append(record)
+            timings["record_total"] += time.perf_counter() - record_start
+            record_count += 1
 
             if args.flush_cuda and torch.cuda.is_available():
                 torch.cuda.empty_cache()
 
     df = pd.DataFrame.from_records(records)
-    output_base = os.path.join(args.output_dir, "relax_metrics")
-    output_path = output_base + ".parquet"
-    output_format = "parquet"
-    try:
-        df.to_parquet(output_path, index=False)
-    except (ImportError, ModuleNotFoundError, ValueError) as exc:
-        output_path = output_base + ".csv"
-        output_format = "csv"
-        df.to_csv(output_path, index=False)
-        print(f"Parquet export unavailable ({exc}); wrote CSV instead at {output_path}")
+    output_path = os.path.join(args.output_dir, "relax_metrics.csv")
+    outputs_start = time.perf_counter()
+    df.to_csv(output_path, index=False)
+    output_format = "csv"
+    timings["write_outputs"] += time.perf_counter() - outputs_start
 
+    metadata_start = time.perf_counter()
     metadata = {
         "checkpoint": args.checkpoint,
         "latent_dir": args.latent_dir,
@@ -430,15 +473,27 @@ def run_pipeline(args: argparse.Namespace) -> None:
         "metric_samples": args.metric_samples,
         "emd_samples": args.emd_samples,
         "lb_k": args.lb_k,
+        "compute_lb": args.compute_lb,
         "device": str(device),
+        "seed": args.seed,
+        "masks_path": masks_path,
         "records": len(records),
         "output_path": output_path,
         "output_format": output_format,
     }
     with open(os.path.join(args.output_dir, "relax_metrics_meta.json"), "w") as handle:
         json.dump(metadata, handle, indent=2)
+    timings["write_metadata"] += time.perf_counter() - metadata_start
 
     print(f"Saved metrics to {output_path}")
+
+    total_time = time.perf_counter() - total_start
+    if record_count:
+        print(f"Processed {record_count} latent/mask combinations")
+    print("Timing summary (seconds):")
+    for key, value in sorted(timings.items(), key=lambda kv: kv[1], reverse=True):
+        print(f"  {key}: {value:.2f}")
+    print(f"Total pipeline time: {total_time:.2f}s")
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -467,11 +522,17 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default="/home/ralbe/DALS/mesh_autodecoder/relax_explanations",
         help="Directory to store metrics outputs",
     )
-    parser.add_argument("--num-masks", type=int, default=10, help="Number of random masks")
+    parser.add_argument("--num-masks", type=int, default=100, help="Number of random masks")
     parser.add_argument("--mask-prob", type=float, default=0.5, help="Bernoulli keep probability")
     parser.add_argument("--metric-samples", type=int, default=10000, help="Points sampled per mesh for metrics")
     parser.add_argument("--emd-samples", type=int, default=512, help="Points per mesh for EMD computation")
     parser.add_argument("--lb-k", type=int, default=10, help="Number of Laplace-Beltrami eigenvalues")
+    parser.add_argument(
+        "--compute-lb",
+        action="store_true",
+        help="Compute Laplace-Beltrami eigenvalues and related metrics",
+    )
+    parser.add_argument("--seed", type=int, default=42, help="Random seed for reproducible masking")
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--flush-cuda", action="store_true", help="Clear CUDA cache after each decode")
     return parser

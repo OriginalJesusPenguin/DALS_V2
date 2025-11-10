@@ -1,0 +1,17 @@
+{
+  "checkpoint": "/home/ralbe/DALS/mesh_autodecoder/models/MeshDecoderTrainer_2025-11-06_12-00-26.ckpt",
+  "latent_dir": "/home/ralbe/DALS/mesh_autodecoder/inference_results/meshes_MeshDecoderTrainer_2025-11-06_12-00-26/latents",
+  "target_dir": "/home/ralbe/DALS/mesh_autodecoder/inference_results/meshes_MeshDecoderTrainer_2025-11-06_12-00-26",
+  "num_masks": 3000,
+  "mask_prob": 0.5,
+  "metric_samples": 10000,
+  "emd_samples": 512,
+  "lb_k": 10,
+  "compute_lb": false,
+  "device": "cuda",
+  "seed": 42,
+  "masks_path": "/home/ralbe/DALS/mesh_autodecoder/relax_explanations/relax_masks.pt",
+  "records": 60000,
+  "output_path": "/home/ralbe/DALS/mesh_autodecoder/relax_explanations/relax_metrics.csv",
+  "output_format": "csv"
+}
