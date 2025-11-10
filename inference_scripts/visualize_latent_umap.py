@@ -94,12 +94,11 @@ def plot_embedding(
     color_map = {
         "cirrhotic": "red",
         "healthy": "blue",
-        "unknown": "gray",
     }
 
     marker_map = {
-        "inference": "o",
-        "train": "^",
+        "test set": "o",
+        "train set": "^",
     }
 
     plt.figure(figsize=(9, 6))
@@ -120,28 +119,21 @@ def plot_embedding(
             alpha=0.85,
             edgecolors="k",
             linewidths=0.3,
-            label=f"{dataset} latents",
+            label=dataset,
         )
-
-    for (x, y), label, name, dtype in zip(embedding, labels, names, dataset_types):
-        if label == "unknown":
-            continue
-        if dtype == "train":
-            continue
-        plt.annotate(name, (x, y), textcoords="offset points", xytext=(2, 2), fontsize=7)
 
     color_handles = [
         plt.Line2D([0], [0], marker="o", color="w", markerfacecolor=color_map[lbl], markersize=7)
-        for lbl in ["cirrhotic", "healthy", "unknown"]
+        for lbl in ["cirrhotic", "healthy"]
     ]
     marker_handles = [
         plt.Line2D([0], [0], marker=marker_map[key], color="k", linestyle="None", markersize=7)
-        for key in sorted(set(dataset_types))
+        for key in sorted(set(marker_map.keys()) & set(dataset_types))
     ]
 
-    legend1 = ax.legend(color_handles, ["cirrhotic", "healthy", "unknown"], title="Label", loc="upper right")
+    legend1 = ax.legend(color_handles, ["cirrhotic", "healthy"], title="Label", loc="upper right")
     ax.add_artist(legend1)
-    ax.legend(marker_handles, [f"{key} latents" for key in sorted(set(dataset_types))], title="Source", loc="lower right")
+    ax.legend(marker_handles, [key for key in sorted(set(marker_map.keys()) & set(dataset_types))], title="Source", loc="lower left")
 
     plt.title("UMAP projection of latent codes (train + inference)")
     plt.xlabel("UMAP-1")
@@ -169,7 +161,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--output",
-        default="",
+        default="umap_finally.png",
         help="Optional path to save the plot (e.g., /tmp/latents_umap.png). Shows interactively if omitted.",
     )
     return parser.parse_args()
@@ -183,7 +175,7 @@ def main() -> None:
     combined_latents = np.concatenate([inference_latents, train_latents], axis=0)
     combined_labels = inference_labels + train_labels
     combined_names = inference_names + train_names
-    dataset_types = ["inference"] * len(inference_labels) + ["train"] * len(train_labels)
+    dataset_types = ["test set"] * len(inference_labels) + ["train set"] * len(train_labels)
 
     embedding = compute_umap(combined_latents)
     plot_embedding(embedding, combined_labels, combined_names, dataset_types, args.output)
