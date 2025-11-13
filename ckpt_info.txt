@@ -1,0 +1,19 @@
+best_epoch
+best_epoch_losses
+best_loss
+decoder_mode
+decoder_state_dict
+epoch
+hparams
+kendall_log_sigmas
+latent_features
+latent_vectors
+optimizer_state_dict
+scheduler_state_dict
+template
+train_data_path
+train_filenames
+val_data_path
+latent_vectors type=<class 'torch.nn.modules.sparse.Embedding'>
+embedding shape=torch.Size([345, 128])
+template type=<class 'pytorch3d.structures.meshes.Meshes'>

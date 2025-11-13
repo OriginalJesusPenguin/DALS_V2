@@ -1,8 +1,10 @@
 import argparse
+import math
 import os
 import random
 from collections import defaultdict
 from pathlib import Path
+from statistics import NormalDist
 from typing import Any, DefaultDict, Dict, List, Sequence, Tuple
 
 import matplotlib.pyplot as plt
@@ -59,6 +61,12 @@ def parse_args() -> argparse.Namespace:
         '--output-dir',
         default='/home/ralbe/DALS/mesh_autodecoder/inference_results/latent_classifier_outputs',
         help='Directory to store generated figures.',
+    )
+    parser.add_argument(
+        '--num-seeds',
+        type=int,
+        default=10,
+        help='Number of random seeds to evaluate.',
     )
     return parser.parse_args()
 
@@ -343,7 +351,9 @@ def summarize_dataset(name: str, labels: torch.Tensor) -> None:
 
 
 def plot_confusion_matrices(
-    metrics_by_split: Dict[str, Dict[str, Any]], output_dir: Path
+    metrics_by_split: Dict[str, Dict[str, Any]],
+    output_dir: Path,
+    filename: str = 'confusion_matrices.png',
 ) -> Path:
     splits = list(metrics_by_split.keys())
     fig, axes = plt.subplots(
@@ -377,7 +387,7 @@ def plot_confusion_matrices(
         ax.set_ylabel('Actual')
 
     plt.tight_layout()
-    output_path = output_dir / 'confusion_matrices.png'
+    output_path = output_dir / filename
     fig.savefig(output_path, dpi=300)
     plt.close(fig)
     print(f'Confusion matrices saved to {output_path}')
@@ -417,6 +427,7 @@ def plot_feature_importance(
     importances: np.ndarray,
     output_dir: Path,
     top_k: int = 20,
+    filename: str = 'latent_feature_importance.png',
 ) -> Path:
     top_k = min(top_k, len(importances))
     top_indices = np.argsort(importances)[::-1][:top_k]
@@ -431,7 +442,7 @@ def plot_feature_importance(
     ax.set_title(f'Top {top_k} latent dimensions by importance (test set)')
     plt.tight_layout()
 
-    output_path = output_dir / 'latent_feature_importance.png'
+    output_path = output_dir / filename
     fig.savefig(output_path, dpi=300)
     plt.close(fig)
     print(f'Feature importance plot saved to {output_path}')
@@ -445,21 +456,53 @@ def report_top_features(importances: np.ndarray, top_k: int = 10) -> None:
         print(f'  {rank:02d}. Latent {idx:3d}: importance={importances[idx]:.6f}')
 
 
-def main() -> None:
-    args = parse_args()
-    set_seed(args.seed)
+def wilson_confidence_interval(
+    successes: int,
+    total: int,
+    confidence: float = 0.95,
+) -> Tuple[float, float]:
+    if total == 0:
+        return float('nan'), float('nan')
+    alpha = 1.0 - confidence
+    z = NormalDist().inv_cdf(1.0 - alpha / 2.0)
+    phat = successes / total
+    denom = 1.0 + (z * z) / total
+    center = (phat + (z * z) / (2.0 * total)) / denom
+    margin = z * math.sqrt((phat * (1.0 - phat) + (z * z) / (4.0 * total)) / total) / denom
+    lower = max(0.0, center - margin)
+    upper = min(1.0, center + margin)
+    return lower, upper
 
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    print(f'Using device: {device}')
 
-    output_dir = Path(args.output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
+def format_metrics(split: str, metrics: Dict[str, float]) -> None:
+    print(
+        f'\n{split} metrics:\n'
+        f'  Loss:      {metrics["loss"]:.4f}\n'
+        f'  Accuracy:  {metrics["accuracy"]:.4f}\n'
+        f'  Precision: {metrics["precision"]:.4f}\n'
+        f'  Recall:    {metrics["recall"]:.4f}\n'
+        f'  F1 score:  {metrics["f1"]:.4f}\n'
+        f'  ROC AUC:   {metrics["roc_auc"]:.4f}\n'
+        f'  Confusion matrix: '
+        f'TP={metrics["tp"]}, TN={metrics["tn"]}, FP={metrics["fp"]}, FN={metrics["fn"]}'
+    )
 
-    train_latents, train_labels, train_filenames = load_training_latents(args.checkpoint)
-    summarize_dataset('Full training', train_labels)
+
+def run_single_seed(
+    seed: int,
+    args: argparse.Namespace,
+    device: torch.device,
+    train_latents: torch.Tensor,
+    train_labels: torch.Tensor,
+    input_dim: int,
+    test_dataset: TensorDataset,
+    output_dir: Path,
+) -> Tuple[Dict[str, Any], np.ndarray]:
+    print(f'\n=== Seed {seed} ===')
+    set_seed(seed)
 
     train_dataset, val_dataset = stratified_split(
-        train_latents, train_labels, args.val_ratio, args.seed
+        train_latents, train_labels, args.val_ratio, seed
     )
 
     summarize_dataset('Train subset', train_dataset.tensors[1])
@@ -468,7 +511,6 @@ def main() -> None:
     train_loader = create_dataloader(train_dataset, args.batch_size, shuffle=True)
     val_loader = create_dataloader(val_dataset, args.batch_size, shuffle=False)
 
-    input_dim = train_latents.size(1)
     model = LatentClassifier(in_features=input_dim, hidden_dim=args.hidden_dim).to(device)
 
     train_label_tensor = train_dataset.tensors[1]
@@ -490,13 +532,10 @@ def main() -> None:
         args.epochs,
     )
 
-    test_latents, test_labels, test_filenames = load_test_latents(args.test_latent_dir)
-    summarize_dataset('Test set', test_labels)
+    test_loader = create_dataloader(test_dataset, args.batch_size, shuffle=False)
 
     train_metrics = evaluate(model, train_loader, criterion, device)
     val_metrics = evaluate(model, val_loader, criterion, device)
-    test_dataset = TensorDataset(test_latents, test_labels)
-    test_loader = create_dataloader(test_dataset, args.batch_size, shuffle=False)
     test_metrics = evaluate(model, test_loader, criterion, device)
 
     metrics_by_split = {
@@ -504,19 +543,6 @@ def main() -> None:
         'Validation': val_metrics,
         'Test': test_metrics,
     }
-
-    def format_metrics(split: str, metrics: Dict[str, float]) -> None:
-        print(
-            f'\n{split} metrics:\n'
-            f'  Loss:      {metrics["loss"]:.4f}\n'
-            f'  Accuracy:  {metrics["accuracy"]:.4f}\n'
-            f'  Precision: {metrics["precision"]:.4f}\n'
-            f'  Recall:    {metrics["recall"]:.4f}\n'
-            f'  F1 score:  {metrics["f1"]:.4f}\n'
-            f'  ROC AUC:   {metrics["roc_auc"]:.4f}\n'
-            f'  Confusion matrix: '
-            f'TP={metrics["tp"]}, TN={metrics["tn"]}, FP={metrics["fp"]}, FN={metrics["fn"]}'
-        )
 
     format_metrics('Training', train_metrics)
     format_metrics('Validation', val_metrics)
@@ -527,6 +553,142 @@ def main() -> None:
     test_importances = compute_feature_importance(model, test_loader, device)
     report_top_features(test_importances, top_k=10)
     plot_feature_importance(test_importances, output_dir, top_k=20)
+
+    return test_metrics, test_importances
+
+
+def main() -> None:
+    args = parse_args()
+    if args.num_seeds <= 0:
+        raise ValueError('num_seeds must be positive.')
+
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    print(f'Using device: {device}')
+
+    output_dir = Path(args.output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    train_latents, train_labels, _ = load_training_latents(args.checkpoint)
+    summarize_dataset('Full training', train_labels)
+
+    input_dim = train_latents.size(1)
+    test_latents, test_labels, _ = load_test_latents(args.test_latent_dir)
+    summarize_dataset('Test set', test_labels)
+
+    test_dataset = TensorDataset(test_latents, test_labels)
+    seed_values = [args.seed + i for i in range(args.num_seeds)]
+
+    test_metrics_list: List[Dict[str, Any]] = []
+    importances_list: List[np.ndarray] = []
+
+    for run_idx, seed in enumerate(seed_values, start=1):
+        run_dir = output_dir / f'seed_{seed}'
+        run_dir.mkdir(parents=True, exist_ok=True)
+        print(f'\n=== Run {run_idx}/{args.num_seeds} (seed={seed}) ===')
+        test_metrics, test_importances = run_single_seed(
+            seed,
+            args,
+            device,
+            train_latents,
+            train_labels,
+            input_dim,
+            test_dataset,
+            run_dir,
+        )
+        test_metrics_list.append(test_metrics)
+        importances_list.append(test_importances)
+
+    if not test_metrics_list:
+        raise RuntimeError('No runs executed.')
+
+    losses = np.array([m['loss'] for m in test_metrics_list], dtype=float)
+    accuracies = np.array([m['accuracy'] for m in test_metrics_list], dtype=float)
+    precisions = np.array([m['precision'] for m in test_metrics_list], dtype=float)
+    recalls = np.array([m['recall'] for m in test_metrics_list], dtype=float)
+    f1s = np.array([m['f1'] for m in test_metrics_list], dtype=float)
+    specificities = np.array(
+        [
+            (m['tn'] / (m['tn'] + m['fp'])) if (m['tn'] + m['fp']) > 0 else float('nan')
+            for m in test_metrics_list
+        ],
+        dtype=float,
+    )
+    print('\nAggregated test accuracy across seeds:')
+    for seed, acc in zip(seed_values, accuracies):
+        print(f'  Seed {seed}: {acc:.4f}')
+    print(f'  Mean: {accuracies.mean():.4f} | Std: {accuracies.std(ddof=0):.4f}')
+
+    roc_auc_values = np.array([m['roc_auc'] for m in test_metrics_list], dtype=float)
+    if np.isnan(roc_auc_values).all():
+        roc_auc_mean = float('nan')
+    else:
+        roc_auc_mean = float(np.nanmean(roc_auc_values))
+
+    tp_total = int(sum(m['tp'] for m in test_metrics_list))
+    tn_total = int(sum(m['tn'] for m in test_metrics_list))
+    fp_total = int(sum(m['fp'] for m in test_metrics_list))
+    fn_total = int(sum(m['fn'] for m in test_metrics_list))
+    total_negatives = tn_total + fp_total
+    aggregated_specificity = (
+        float(tn_total / total_negatives) if total_negatives > 0 else float('nan')
+    )
+
+    aggregated_metrics: Dict[str, Any] = {
+        'loss': float(losses.mean()),
+        'accuracy': float(accuracies.mean()),
+        'precision': float(precisions.mean()),
+        'recall': float(recalls.mean()),
+        'f1': float(f1s.mean()),
+        'roc_auc': roc_auc_mean,
+        'tp': tp_total,
+        'tn': tn_total,
+        'fp': fp_total,
+        'fn': fn_total,
+        'specificity': aggregated_specificity,
+    }
+
+    format_metrics('Aggregated test', aggregated_metrics)
+    print('\nTest metrics (mean ± std across seeds):')
+    print(f'  Loss:      {losses.mean():.4f} ± {losses.std(ddof=0):.4f}')
+    print(f'  Accuracy:  {accuracies.mean():.4f} ± {accuracies.std(ddof=0):.4f}')
+    print(f'  Precision: {precisions.mean():.4f} ± {precisions.std(ddof=0):.4f}')
+    print(f'  Recall:    {recalls.mean():.4f} ± {recalls.std(ddof=0):.4f}')
+    print(f'  F1 score:  {f1s.mean():.4f} ± {f1s.std(ddof=0):.4f}')
+    if np.isnan(roc_auc_values).all():
+        print('  ROC AUC:  nan')
+    else:
+        print(
+            f'  ROC AUC:   {np.nanmean(roc_auc_values):.4f} ± '
+            f'{np.nanstd(roc_auc_values, ddof=0):.4f}'
+        )
+    if np.isnan(specificities).all():
+        print('  Specificity: nan')
+    else:
+        print(
+            f'  Specificity: {np.nanmean(specificities):.4f} ± '
+            f'{np.nanstd(specificities, ddof=0):.4f}'
+        )
+    plot_confusion_matrices(
+        {'Aggregated Test': aggregated_metrics},
+        output_dir,
+        filename='confusion_matrices_aggregated.png',
+    )
+
+    aggregated_importances = np.mean(np.stack(importances_list, axis=0), axis=0)
+    print('\nAggregated latent importance across seeds:')
+    report_top_features(aggregated_importances, top_k=10)
+    plot_feature_importance(
+        aggregated_importances,
+        output_dir,
+        top_k=20,
+        filename='latent_feature_importance_aggregated.png',
+    )
+
+    ci_lower, ci_upper = wilson_confidence_interval(tn_total, total_negatives)
+    print(
+        f'\nAggregated specificity: {aggregated_specificity:.4f} '
+        f'(95% CI: [{ci_lower:.4f}, {ci_upper:.4f}])'
+    )
 
 
 if __name__ == '__main__':
