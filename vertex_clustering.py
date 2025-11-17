@@ -18,8 +18,12 @@ import argparse
 import math
 import sys
 from pathlib import Path
-from typing import Callable, Optional, Tuple
+from typing import Callable, Dict, Optional, Tuple
 
+import matplotlib
+
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
 import numpy as np
 import trimesh
 from nibabel import load as load_nifti
@@ -27,12 +31,18 @@ from nibabel.nifti1 import Nifti1Image
 from skimage.measure import marching_cubes
 
 import trimesh.repair as repair
+import trimesh.remesh as remesh
 from trimesh import smoothing, util
 
 try:
     from pymeshfix import MeshFix
 except ImportError:  # pragma: no cover - optional dependency
     MeshFix = None
+
+try:
+    import pyvista as pv
+except ImportError:  # pragma: no cover - optional dependency
+    pv = None
 
 
 def compute_voxel_indices(points: np.ndarray, origin: np.ndarray, voxel_size: float) -> np.ndarray:
@@ -506,6 +516,309 @@ def clean_mesh(
     return mesh
 
 
+def split_long_edges(mesh: trimesh.Trimesh, split_threshold: float) -> trimesh.Trimesh:
+    edges = np.asarray(mesh.edges_unique)
+    lengths = np.asarray(mesh.edges_unique_length)
+    if edges.size == 0 or lengths.size == 0:
+        return mesh
+
+    edge_lengths = {
+        tuple(sorted((int(e[0]), int(e[1])))): float(length)
+        for e, length in zip(edges, lengths)
+    }
+
+    vertices = mesh.vertices.tolist()
+    faces_out = []
+    edge_midpoints: Dict[Tuple[int, int], int] = {}
+
+    for face in mesh.faces:
+        a, b, c = map(int, face)
+        edge_keys = [
+            tuple(sorted((a, b))),
+            tuple(sorted((b, c))),
+            tuple(sorted((c, a))),
+        ]
+        split_flags = [edge_lengths.get(key, 0.0) > split_threshold for key in edge_keys]
+        mids = [None, None, None]
+
+        if not any(split_flags):
+            faces_out.append([a, b, c])
+            continue
+
+        for idx, flag in enumerate(split_flags):
+            if flag:
+                key = edge_keys[idx]
+                if key not in edge_midpoints:
+                    va, vb = mesh.vertices[key[0]], mesh.vertices[key[1]]
+                    midpoint = 0.5 * (va + vb)
+                    edge_midpoints[key] = len(vertices)
+                    vertices.append(midpoint.tolist())
+                mids[idx] = edge_midpoints[key]
+
+        split_count = sum(split_flags)
+        if split_count == 1:
+            if split_flags[0]:
+                m = mids[0]
+                faces_out.extend([[a, m, c], [m, b, c]])
+            elif split_flags[1]:
+                m = mids[1]
+                faces_out.extend([[b, m, a], [m, c, a]])
+            else:  # split_flags[2]
+                m = mids[2]
+                faces_out.extend([[c, m, b], [m, a, b]])
+            continue
+
+        if split_count == 2:
+            if not split_flags[0]:  # edges (b, c) and (c, a)
+                m1, m2 = mids[1], mids[2]
+                faces_out.extend([[b, m1, a], [m1, m2, a], [m1, c, m2]])
+            elif not split_flags[1]:  # edges (a, b) and (c, a)
+                m0, m2 = mids[0], mids[2]
+                faces_out.extend([[a, m0, b], [m0, m2, b], [m2, c, b]])
+            else:  # edges (a, b) and (b, c)
+                m0, m1 = mids[0], mids[1]
+                faces_out.extend([[a, m0, c], [m0, m1, c], [m0, b, m1]])
+            continue
+
+        if split_count == 3:
+            m0, m1, m2 = mids
+            faces_out.extend(
+                [
+                    [a, m0, m2],
+                    [m0, b, m1],
+                    [m2, m1, c],
+                    [m0, m1, m2],
+                ]
+            )
+            continue
+
+    new_vertices = np.asarray(vertices, dtype=np.float64)
+    new_faces = np.asarray(faces_out, dtype=np.int64)
+
+    subdivided = trimesh.Trimesh(vertices=new_vertices, faces=new_faces, process=False)
+    subdivided.remove_duplicate_faces()
+    subdivided.remove_degenerate_faces()
+    subdivided.remove_unreferenced_vertices()
+    repair.fix_normals(subdivided, multibody=False)
+    return subdivided
+
+
+def collapse_short_edges(mesh: trimesh.Trimesh, collapse_threshold: float) -> trimesh.Trimesh:
+    edges = np.asarray(mesh.edges_unique)
+    lengths = np.asarray(mesh.edges_unique_length)
+    if edges.size == 0 or lengths.size == 0:
+        return mesh
+
+    short_mask = lengths < collapse_threshold
+    if not np.any(short_mask):
+        return mesh
+
+    short_edges = edges[short_mask].astype(np.int64)
+    parent = np.arange(len(mesh.vertices), dtype=np.int64)
+
+    def find(x: int) -> int:
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    def union(a: int, b: int) -> None:
+        ra, rb = find(a), find(b)
+        if ra == rb:
+            return
+        if ra < rb:
+            parent[rb] = ra
+        else:
+            parent[ra] = rb
+
+    collapsed_vertices = set()
+    for u, v in short_edges:
+        u_i, v_i = int(u), int(v)
+        if u_i in collapsed_vertices or v_i in collapsed_vertices:
+            continue
+        union(u_i, v_i)
+        collapsed_vertices.add(u_i)
+        collapsed_vertices.add(v_i)
+
+    roots = np.array([find(i) for i in range(len(parent))], dtype=np.int64)
+    unique_roots, inverse = np.unique(roots, return_inverse=True)
+
+    new_vertices = np.zeros((len(unique_roots), 3), dtype=np.float64)
+    counts = np.zeros(len(unique_roots), dtype=np.int64)
+    for idx, new_idx in enumerate(inverse):
+        new_vertices[new_idx] += mesh.vertices[idx]
+        counts[new_idx] += 1
+    counts = np.maximum(counts, 1)
+    new_vertices /= counts[:, None]
+
+    faces_mapped = inverse[mesh.faces]
+    keep = ~(
+        (faces_mapped[:, 0] == faces_mapped[:, 1])
+        | (faces_mapped[:, 1] == faces_mapped[:, 2])
+        | (faces_mapped[:, 0] == faces_mapped[:, 2])
+    )
+    faces_new = faces_mapped[keep]
+    if faces_new.size == 0:
+        return mesh
+
+    collapsed = trimesh.Trimesh(vertices=new_vertices, faces=faces_new, process=False)
+    collapsed.remove_duplicate_faces()
+    collapsed.remove_degenerate_faces()
+    collapsed.remove_unreferenced_vertices()
+    repair.fix_normals(collapsed, multibody=False)
+    return collapsed
+
+
+def homogenize_edge_lengths(
+    mesh: trimesh.Trimesh,
+    split_ratio: float = 4.0 / 3.0,
+    collapse_ratio: float = 4.0 / 5.0,
+    passes: int = 2,
+    smooth_iters: int = 0,
+) -> trimesh.Trimesh:
+    current = mesh.copy()
+    passes = max(1, int(passes))
+
+    for _ in range(passes):
+        lengths = np.asarray(current.edges_unique_length)
+        if lengths.size == 0:
+            break
+        mean_len = float(lengths.mean())
+        split_threshold = mean_len * split_ratio
+        collapse_threshold = mean_len * collapse_ratio
+
+        if lengths.max() > split_threshold:
+            current = split_long_edges(current, split_threshold)
+            lengths = np.asarray(current.edges_unique_length)
+            if lengths.size == 0:
+                break
+            mean_len = float(lengths.mean())
+            collapse_threshold = mean_len * collapse_ratio
+
+        if lengths.min() < collapse_threshold:
+            current = collapse_short_edges(current, collapse_threshold)
+
+    current.remove_duplicate_faces()
+    current.remove_degenerate_faces()
+    current.remove_unreferenced_vertices()
+    repair.fix_normals(current, multibody=False)
+
+    if smooth_iters > 0:
+        smoothing.filter_taubin(current, lamb=0.5, nu=-0.53, iterations=int(smooth_iters))
+        current.rezero()
+        repair.fix_normals(current, multibody=False)
+
+    return current
+
+
+def ensure_watertight(
+    mesh: trimesh.Trimesh,
+    target_vertices: int,
+    tolerance_ratio: float,
+    max_iter: int,
+    representative: str,
+    component_area_ratio: float,
+    smoothing_iters: int,
+) -> trimesh.Trimesh:
+    watertight = mesh.copy()
+    try:
+        watertight.fill_holes()
+        watertight.remove_unreferenced_vertices()
+    except Exception:
+        pass
+
+    if MeshFix is not None:
+        try:
+            fixer = MeshFix(watertight.vertices, watertight.faces)
+            fixer.repair(verbose=False, joincomp=True, remove_smallest_components=True)
+            v_fixed, f_fixed = fixer.return_arrays()
+            if v_fixed.size and f_fixed.size:
+                watertight = trimesh.Trimesh(
+                    vertices=np.asarray(v_fixed),
+                    faces=np.asarray(f_fixed, dtype=np.int64),
+                    process=False,
+                )
+        except Exception:
+            pass
+
+    if not watertight.is_watertight:
+        try:
+            repair.fill_holes(watertight)
+            watertight.remove_unreferenced_vertices()
+        except Exception:
+            pass
+
+    if not watertight.is_watertight and pv is not None:
+        try:
+            faces = watertight.faces.reshape(-1, 3)
+            faces_pv = np.hstack([np.full((faces.shape[0], 1), 3, dtype=np.int64), faces]).ravel()
+            pv_mesh = pv.PolyData(watertight.vertices, faces_pv)
+            pv_mesh = pv_mesh.triangulate()
+            pv_mesh = pv_mesh.clean(tolerance=0.0, absolute=True)
+            filled = pv_mesh.fill_holes(1e6).clean(tolerance=0.0, absolute=True)
+            if filled.n_faces > 0:
+                faces_array = filled.faces.reshape(-1, 4)[:, 1:]
+                watertight = trimesh.Trimesh(
+                    vertices=np.asarray(filled.points),
+                    faces=np.asarray(faces_array, dtype=np.int64),
+                    process=False,
+                )
+        except Exception:
+            pass
+
+    try:
+        components = watertight.split(only_watertight=False)
+        if len(components) > 1:
+            watertight = max(components, key=lambda c: c.volume if c.is_volume else c.area)
+    except Exception:
+        pass
+
+    watertight.remove_duplicate_faces()
+    watertight.remove_degenerate_faces()
+    watertight.remove_unreferenced_vertices()
+    watertight = watertight.process(validate=True)
+    repair.fix_normals(watertight, multibody=False)
+
+    if not watertight.is_watertight:
+        try:
+            pitch = max(watertight.extents.max() / 200.0, 1e-3)
+            vox = watertight.voxelized(pitch)
+            solid = vox.fill()
+            watertight = solid.marching_cubes
+            watertight.remove_duplicate_faces()
+            watertight.remove_degenerate_faces()
+            watertight.remove_unreferenced_vertices()
+            watertight = clean_mesh(
+                watertight,
+                component_area_ratio=component_area_ratio,
+                smooth_iters=0,
+            )
+            watertight = homogenize_edge_lengths(
+                watertight,
+                split_ratio=4.0 / 3.0,
+                collapse_ratio=4.0 / 5.0,
+                passes=1,
+                smooth_iters=smoothing_iters,
+            )
+            watertight = simplify_mesh_vertex_clustering(
+                watertight,
+                target_vertices=target_vertices,
+                tolerance_ratio=tolerance_ratio,
+                max_iter=max_iter,
+                representative=representative,
+            )
+        except Exception:
+            pass
+
+        watertight.remove_duplicate_faces()
+        watertight.remove_degenerate_faces()
+        watertight.remove_unreferenced_vertices()
+        watertight = watertight.process(validate=True)
+        repair.fix_normals(watertight, multibody=False)
+
+    return watertight
+
+
 def mesh_diagnostics(mesh: trimesh.Trimesh) -> dict:
     if mesh.faces.shape[0] == 0:
         return {
@@ -560,6 +873,26 @@ def mesh_diagnostics(mesh: trimesh.Trimesh) -> dict:
     }
 
 
+def save_edge_length_histogram(mesh: trimesh.Trimesh, output_path: Path) -> Optional[Path]:
+    lengths = np.asarray(getattr(mesh, "edges_unique_length", []))
+    if lengths.size == 0:
+        return None
+
+    hist_path = output_path.with_name(output_path.stem + "_hist.png")
+
+    fig, ax = plt.subplots(figsize=(8, 5), dpi=150)
+    ax.hist(lengths, bins=60, color="#2563EB", edgecolor="#0F172A")
+    ax.set_xlabel("Edge length")
+    ax.set_ylabel("Count")
+    ax.set_title("Edge Length Distribution")
+    ax.grid(alpha=0.2, linestyle="--")
+    fig.tight_layout()
+    fig.savefig(hist_path, transparent=False)
+    plt.close(fig)
+
+    return hist_path
+
+
 def parse_args():
     p = argparse.ArgumentParser(
         description="Extract a mesh from a NIfTI volume via marching cubes and simplify with vertex clustering."
@@ -600,6 +933,11 @@ def parse_args():
         default=5,
         help="Number of Taubin smoothing iterations applied after simplification (0 disables).",
     )
+    p.add_argument(
+        "--save-hist",
+        action="store_true",
+        help="Compute and save edge-length histogram as a PNG.",
+    )
     return p.parse_args()
 
 
@@ -610,48 +948,119 @@ def main():
         print(f"Input volume not found: {input_path}", file=sys.stderr)
         sys.exit(1)
 
-    try:
-        mesh = marching_cubes_from_nifti(
-            input_path,
-            iso_level=args.iso_level,
-            step_size=args.step_size,
-            allow_degenerate=args.allow_degenerate,
+    output_path = Path(args.output)
+    if output_path.exists():
+        print(f"[SKIP] Output mesh already exists: {output_path}")
+        sys.exit(0)
+
+    component_ratio = max(0.0, float(args.component_threshold))
+    smooth_iters = max(0, int(args.smooth_iters))
+    step_sizes = sorted(set([1, 2, 3, 4, int(args.step_size)]))
+    candidates = []
+
+    for step in step_sizes:
+        try:
+            mesh_candidate = marching_cubes_from_nifti(
+                input_path,
+                iso_level=args.iso_level,
+                step_size=step,
+                allow_degenerate=args.allow_degenerate,
+            )
+        except Exception as exc:
+            print(f"[STEP {step}] Failed to extract mesh: {exc}", file=sys.stderr)
+            continue
+
+        if mesh_candidate.is_empty:
+            print(f"[STEP {step}] Marching cubes produced an empty mesh.", file=sys.stderr)
+            continue
+
+        simplified = simplify_mesh_vertex_clustering(
+            mesh_candidate,
+            target_vertices=args.target_verts,
+            tolerance_ratio=args.tolerance,
+            max_iter=args.max_iter,
+            representative=args.representative,
         )
-    except Exception as exc:
-        print(f"Failed to extract mesh from volume: {exc}", file=sys.stderr)
+
+        simplified = clean_mesh(
+            simplified,
+            component_area_ratio=component_ratio,
+            smooth_iters=0,
+        )
+
+        simplified = homogenize_edge_lengths(
+            simplified,
+            split_ratio=4.0 / 3.0,
+            collapse_ratio=4.0 / 5.0,
+            passes=2,
+            smooth_iters=smooth_iters,
+        )
+
+        simplified = ensure_watertight(
+            simplified,
+            target_vertices=args.target_verts,
+            tolerance_ratio=args.tolerance,
+            max_iter=args.max_iter,
+            representative=args.representative,
+            component_area_ratio=component_ratio,
+            smoothing_iters=smooth_iters,
+        )
+
+        diag = mesh_diagnostics(simplified)
+        v_in = len(mesh_candidate.vertices)
+        v_out = len(simplified.vertices)
+        f_in = len(mesh_candidate.faces)
+        f_out = len(simplified.faces)
+
+        print(
+            f"[STEP {step}] verts {v_in}->{v_out}, faces {f_in}->{f_out}, "
+            f"non-manifold={diag['non_manifold_edges']}, components={diag['disconnected_components']}, "
+            f"watertight={simplified.is_watertight}"
+        )
+
+        candidates.append(
+            {
+                "step": step,
+                "mesh_out": simplified,
+                "diag": diag,
+                "stats": (v_in, v_out, f_in, f_out),
+            }
+        )
+
+    if not candidates:
+        print("Failed to generate a valid mesh for any step size.", file=sys.stderr)
         sys.exit(1)
 
-    if mesh.is_empty:
-        print("Marching cubes produced an empty mesh.", file=sys.stderr)
-        sys.exit(1)
+    def selection_key(entry: Dict) -> Tuple[int, int, int, int, int]:
+        diag = entry["diag"]
+        si = diag["self_intersections"] or 0
+        return (
+            diag["non_manifold_edges"],
+            si,
+            diag["disconnected_components"],
+            diag["flipped_normals"],
+            0 if entry["mesh_out"].is_watertight else 1,
+        )
 
-    simplified = simplify_mesh_vertex_clustering(
-        mesh,
-        target_vertices=args.target_verts,
-        tolerance_ratio=args.tolerance,
-        max_iter=args.max_iter,
-        representative=args.representative
-    )
+    best = min(candidates, key=selection_key)
+    simplified = best["mesh_out"]
+    diagnostics = best["diag"]
+    v_in, v_out, f_in, f_out = best["stats"]
+    selected_step = best["step"]
 
-    simplified = clean_mesh(
-        simplified,
-        component_area_ratio=max(0.0, float(args.component_threshold)),
-        smooth_iters=max(0, int(args.smooth_iters)),
+    print(
+        f"[INFO] Selected step size {selected_step} "
+        f"(non-manifold edges={diagnostics['non_manifold_edges']})"
     )
 
     try:
         simplified.export(args.output)
-        v_in = len(mesh.vertices)
-        v_out = len(simplified.vertices)
-        f_in = len(mesh.faces)
-        f_out = len(simplified.faces)
         print(f"Simplified: {v_in}→{v_out} vertices, {f_in}→{f_out} faces")
         print(f"Saved: {args.output}")
     except Exception as e:
         print(f"Failed to save mesh: {e}", file=sys.stderr)
         sys.exit(1)
 
-    diagnostics = mesh_diagnostics(simplified)
     print("Diagnostics:")
     si = diagnostics["self_intersections"]
     if si is None:
@@ -663,6 +1072,12 @@ def main():
     print(f"  flipped normals: {diagnostics['flipped_normals']}")
     print(f"  disconnected components: {diagnostics['disconnected_components']}")
     print(f"  overlapping faces: {diagnostics['overlapping_faces']}")
+    print(f"  watertight: {simplified.is_watertight}")
+
+    if args.save_hist:
+        hist_path = save_edge_length_histogram(simplified, Path(args.output))
+        if hist_path is not None:
+            print(f"Edge-length histogram saved to: {hist_path}")
 
 
 if __name__ == "__main__":
