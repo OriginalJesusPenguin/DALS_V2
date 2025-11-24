@@ -12,3 +12,4 @@ output/siren_decoder/
 output/
 *.pt
 *.ckpt
+interactive_figures/

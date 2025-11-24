@@ -73,7 +73,7 @@ def get_inference_args():
     args = Args()
     args.latent_mode = "local" 
     args.lr = 1e-3  # Increased learning rate for better optimization
-    args.num_point_samples = 5_000  # Increased to 15k
+    args.num_point_samples = 12_500  # Increased to 15k
     args.point_sample_mode = "fps"
     args.max_iters = 500  # Fixed iterations with learning rate reduction
     args.template_subdiv = 3  # Keep at 3

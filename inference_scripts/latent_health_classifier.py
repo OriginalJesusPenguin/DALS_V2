@@ -5,7 +5,7 @@ import random
 from collections import defaultdict
 from pathlib import Path
 from statistics import NormalDist
-from typing import Any, DefaultDict, Dict, List, Sequence, Tuple
+from typing import Any, DefaultDict, Dict, List, Optional, Sequence, Tuple
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -488,6 +488,27 @@ def format_metrics(split: str, metrics: Dict[str, float]) -> None:
     )
 
 
+def save_metric_summary(
+    output_dir: Path,
+    metric_values: Sequence[Tuple[str, np.ndarray]],
+) -> Path:
+    header = 'metric,mean,std,ci_lower,ci_upper,count'
+    rows: List[str] = [header]
+    for name, values in metric_values:
+        if values.size == 0:
+            continue
+        mean = float(np.mean(values))
+        std = float(np.std(values, ddof=0))
+        lower = mean - std
+        upper = mean + std
+        rows.append(
+            f'{name},{mean:.6f},{std:.6f},{lower:.6f},{upper:.6f},{len(values)}'
+        )
+    path = output_dir / 'aggregated_metrics.csv'
+    path.write_text('\n'.join(rows) + '\n', encoding='utf-8')
+    return path
+
+
 def run_single_seed(
     seed: int,
     args: argparse.Namespace,
@@ -497,7 +518,7 @@ def run_single_seed(
     input_dim: int,
     test_dataset: TensorDataset,
     output_dir: Path,
-) -> Tuple[Dict[str, Any], np.ndarray]:
+) -> Tuple[Dict[str, Any], np.ndarray, Dict[str, torch.Tensor]]:
     print(f'\n=== Seed {seed} ===')
     set_seed(seed)
 
@@ -554,7 +575,9 @@ def run_single_seed(
     report_top_features(test_importances, top_k=10)
     plot_feature_importance(test_importances, output_dir, top_k=20)
 
-    return test_metrics, test_importances
+    model_state = {k: v.cpu().clone() for k, v in model.state_dict().items()}
+
+    return test_metrics, test_importances, model_state
 
 
 def main() -> None:
@@ -580,12 +603,13 @@ def main() -> None:
 
     test_metrics_list: List[Dict[str, Any]] = []
     importances_list: List[np.ndarray] = []
+    model_states: List[Tuple[int, Dict[str, torch.Tensor]]] = []
 
     for run_idx, seed in enumerate(seed_values, start=1):
         run_dir = output_dir / f'seed_{seed}'
         run_dir.mkdir(parents=True, exist_ok=True)
         print(f'\n=== Run {run_idx}/{args.num_seeds} (seed={seed}) ===')
-        test_metrics, test_importances = run_single_seed(
+        test_metrics, test_importances, model_state = run_single_seed(
             seed,
             args,
             device,
@@ -595,8 +619,9 @@ def main() -> None:
             test_dataset,
             run_dir,
         )
-        test_metrics_list.append(test_metrics)
+        test_metrics_list.append({**test_metrics, '_seed': seed})
         importances_list.append(test_importances)
+        model_states.append((seed, model_state))
 
     if not test_metrics_list:
         raise RuntimeError('No runs executed.')
@@ -633,6 +658,20 @@ def main() -> None:
         float(tn_total / total_negatives) if total_negatives > 0 else float('nan')
     )
 
+    state_by_seed = {seed: state for seed, state in model_states}
+
+    best_seed = None
+    best_metrics_for_seed: Optional[Dict[str, Any]] = None
+    best_score = -math.inf
+    for metrics in test_metrics_list:
+        seed = int(metrics.get('_seed', -1))
+        roc_auc = metrics.get('roc_auc', float('nan'))
+        score = roc_auc if not np.isnan(roc_auc) else metrics.get('accuracy', float('-inf'))
+        if score > best_score:
+            best_score = score
+            best_seed = seed
+            best_metrics_for_seed = metrics
+
     aggregated_metrics: Dict[str, Any] = {
         'loss': float(losses.mean()),
         'accuracy': float(accuracies.mean()),
@@ -668,6 +707,54 @@ def main() -> None:
             f'  Specificity: {np.nanmean(specificities):.4f} ± '
             f'{np.nanstd(specificities, ddof=0):.4f}'
         )
+
+    metric_summary_path = save_metric_summary(
+        output_dir,
+        (
+            ('accuracy', accuracies),
+            ('precision', precisions),
+            ('recall', recalls),
+            ('f1', f1s),
+        ),
+    )
+    print('\n95% CI (mean ± std) across seeds:')
+    for label, values in (
+        ('Accuracy', accuracies),
+        ('Precision', precisions),
+        ('Recall', recalls),
+        ('F1 score', f1s),
+    ):
+        mean = float(np.mean(values))
+        std = float(np.std(values, ddof=0))
+        print(f'  {label}: {mean:.4f} ± {std:.4f}')
+    print(f'\nAggregated metric summary saved to {metric_summary_path}')
+
+    if best_seed is not None and best_seed in state_by_seed and best_metrics_for_seed is not None:
+        export_metrics = {
+            key: float(best_metrics_for_seed[key])
+            for key in ('loss', 'accuracy', 'precision', 'recall', 'f1', 'roc_auc')
+            if key in best_metrics_for_seed and not np.isnan(best_metrics_for_seed[key])
+        }
+        export_metrics.update(
+            {
+                key: int(best_metrics_for_seed[key])
+                for key in ('tp', 'tn', 'fp', 'fn')
+                if key in best_metrics_for_seed
+            }
+        )
+        best_model_path = output_dir / f'best_model_seed_{best_seed}.pt'
+        torch.save(
+            {
+                'seed': best_seed,
+                'metrics': export_metrics,
+                'state_dict': state_by_seed[best_seed],
+            },
+            best_model_path,
+        )
+        print(
+            f'Saved best ROC-AUC model (seed {best_seed}, score {best_score:.4f}) to {best_model_path}'
+        )
+
     plot_confusion_matrices(
         {'Aggregated Test': aggregated_metrics},
         output_dir,

@@ -511,6 +511,7 @@ def main():
         latent_dim = None
 
     model_name = os.path.basename(args.checkpoint_path).replace('.ckpt', '')
+    # model_name = 'MeshDecoderTrainer_2025-11-21_11-44-53.ckpt'
     mesh_output_dir = os.path.join(INFERENCE_RESULTS_DIR, f'meshes_{model_name}')
 
     checkpoint_info = {
