@@ -1,0 +1,2 @@
+ChamferL2 x 10000_mean,ChamferL2 x 10000_std,BL quality_mean,BL quality_std,No. ints._mean,No. ints._std,Precision@0.01_mean,Precision@0.01_std,Recall@0.01_mean,Recall@0.01_std,F1@0.01_mean,F1@0.01_std,Precision@0.02_mean,Precision@0.02_std,Recall@0.02_mean,Recall@0.02_std,F1@0.02_mean,F1@0.02_std,Search_mean,Search_std,Total_mean,Total_std,num_test_samples
+3.182224988937378,0.0,0.9952208399772644,0.0,0.0,0.0,61.97999572753906,0.0,66.06999969482422,0.0,63.95968246459961,0.0,88.55999755859375,0.0,95.0,0.0,91.66703033447266,0.0,0.00449824333190918,0.0,0.00449824333190918,0.0,1
